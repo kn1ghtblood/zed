@@ -27,4 +27,8 @@ jobs:
           ${{ runner.os }}-cargo-
     - name: Build
       run: cargo build --release
-    
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: rust-binary
+        path: target/release/
