@@ -1,0 +1,34 @@
+name: Personal_build
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set CARGO_HOME
+      run: echo "CARGO_HOME=C:/cargo-cache" >> $GITHUB_ENV
+
+    - name: Configure Git to disable long paths
+      run: git config --global core.longpaths true
+
+    - name: Cache Cargo
+      uses: actions/cache@v3
+      with:
+        path: |
+          C:/cargo-cache
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-
+    - name: Build
+      run: cargo build --release
+    - name: Upload binary artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: zed.exe
+        path: target/release/zed.exe
