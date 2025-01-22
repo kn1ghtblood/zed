@@ -1,5 +1,6 @@
 use std::{
     path::{Path, PathBuf},
+    pin::pin,
     sync::{atomic::AtomicUsize, Arc},
 };
 
@@ -24,9 +25,9 @@ use smol::{
 };
 use text::ReplicaId;
 use util::{paths::SanitizedPath, ResultExt};
-use worktree::{Entry, ProjectEntryId, Worktree, WorktreeId, WorktreeSettings};
+use worktree::{Entry, ProjectEntryId, UpdatedEntriesSet, Worktree, WorktreeId, WorktreeSettings};
 
-use crate::{search::SearchQuery, LspStore, ProjectPath};
+use crate::{search::SearchQuery, ProjectPath};
 
 struct MatchingEntry {
     worktree_path: Arc<Path>,
@@ -62,7 +63,9 @@ pub enum WorktreeStoreEvent {
     WorktreeReleased(EntityId, WorktreeId),
     WorktreeOrderChanged,
     WorktreeUpdateSent(Model<Worktree>),
-    GitRepositoryUpdated,
+    WorktreeUpdatedEntries(WorktreeId, UpdatedEntriesSet),
+    WorktreeUpdatedGitRepositories(WorktreeId),
+    WorktreeDeletedEntry(WorktreeId, ProjectEntryId),
 }
 
 impl EventEmitter<WorktreeStoreEvent> for WorktreeStore {}
@@ -364,6 +367,26 @@ impl WorktreeStore {
         self.send_project_updates(cx);
 
         let handle_id = worktree.entity_id();
+        cx.subscribe(worktree, |_, worktree, event, cx| {
+            let worktree_id = worktree.update(cx, |worktree, _| worktree.id());
+            match event {
+                worktree::Event::UpdatedEntries(changes) => {
+                    cx.emit(WorktreeStoreEvent::WorktreeUpdatedEntries(
+                        worktree.read(cx).id(),
+                        changes.clone(),
+                    ));
+                }
+                worktree::Event::UpdatedGitRepositories(_) => {
+                    cx.emit(WorktreeStoreEvent::WorktreeUpdatedGitRepositories(
+                        worktree_id,
+                    ));
+                }
+                worktree::Event::DeletedEntry(id) => {
+                    cx.emit(WorktreeStoreEvent::WorktreeDeletedEntry(worktree_id, *id))
+                }
+            }
+        })
+        .detach();
         cx.observe_release(worktree, move |this, worktree, cx| {
             cx.emit(WorktreeStoreEvent::WorktreeReleased(
                 handle_id,
@@ -375,17 +398,6 @@ impl WorktreeStore {
             ));
             this.send_project_updates(cx);
         })
-        .detach();
-
-        cx.subscribe(
-            worktree,
-            |_this, _, event: &worktree::Event, cx| match event {
-                worktree::Event::UpdatedGitRepositories(_) => {
-                    cx.emit(WorktreeStoreEvent::GitRepositoryUpdated);
-                }
-                worktree::Event::DeletedEntry(_) | worktree::Event::UpdatedEntries(_) => {}
-            },
-        )
         .detach();
     }
 
@@ -660,7 +672,7 @@ impl WorktreeStore {
         // We spawn a number of workers that take items from the filter channel and check the query
         // against the version of the file on disk.
         let (filter_tx, filter_rx) = smol::channel::bounded(64);
-        let (output_tx, mut output_rx) = smol::channel::bounded(64);
+        let (output_tx, output_rx) = smol::channel::bounded(64);
         let (matching_paths_tx, matching_paths_rx) = smol::channel::unbounded();
 
         let input = cx.background_executor().spawn({
@@ -697,7 +709,7 @@ impl WorktreeStore {
         cx.background_executor()
             .spawn(async move {
                 let mut matched = 0;
-                while let Some(mut receiver) = output_rx.next().await {
+                while let Ok(mut receiver) = output_rx.recv().await {
                     let Some(path) = receiver.next().await else {
                         continue;
                     };
@@ -1002,6 +1014,7 @@ impl WorktreeStore {
         mut input: Receiver<MatchingEntry>,
         query: &SearchQuery,
     ) -> Result<()> {
+        let mut input = pin!(input);
         while let Some(mut entry) = input.next().await {
             let abs_path = entry.worktree_path.join(&entry.path.path);
             let Some(file) = fs.open_sync(&abs_path).await.log_err() else {
@@ -1026,59 +1039,6 @@ impl WorktreeStore {
                 .ok_or_else(|| anyhow!("worktree not found"))
         })??;
         Worktree::handle_create_entry(worktree, envelope.payload, cx).await
-    }
-
-    pub async fn handle_rename_project_entry(
-        this: Model<super::Project>,
-        envelope: TypedEnvelope<proto::RenameProjectEntry>,
-        mut cx: AsyncAppContext,
-    ) -> Result<proto::ProjectEntryResponse> {
-        let entry_id = ProjectEntryId::from_proto(envelope.payload.entry_id);
-        let (worktree_id, worktree, old_path, is_dir) = this
-            .update(&mut cx, |this, cx| {
-                this.worktree_store
-                    .read(cx)
-                    .worktree_and_entry_for_id(entry_id, cx)
-                    .map(|(worktree, entry)| {
-                        (
-                            worktree.read(cx).id(),
-                            worktree,
-                            entry.path.clone(),
-                            entry.is_dir(),
-                        )
-                    })
-            })?
-            .ok_or_else(|| anyhow!("worktree not found"))?;
-        let (old_abs_path, new_abs_path) = {
-            let root_path = worktree.update(&mut cx, |this, _| this.abs_path())?;
-            (
-                root_path.join(&old_path),
-                root_path.join(&envelope.payload.new_path),
-            )
-        };
-        let lsp_store = this
-            .update(&mut cx, |this, _| this.lsp_store())?
-            .downgrade();
-        LspStore::will_rename_entry(
-            lsp_store,
-            worktree_id,
-            &old_abs_path,
-            &new_abs_path,
-            is_dir,
-            cx.clone(),
-        )
-        .await;
-        let response = Worktree::handle_rename_entry(worktree, envelope.payload, cx.clone()).await;
-        this.update(&mut cx, |this, cx| {
-            this.lsp_store().read(cx).did_rename_entry(
-                worktree_id,
-                &old_abs_path,
-                &new_abs_path,
-                is_dir,
-            );
-        })
-        .ok();
-        response
     }
 
     pub async fn handle_copy_project_entry(

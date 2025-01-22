@@ -80,7 +80,7 @@ impl CloudModel {
                 | open_ai::Model::FourOmni
                 | open_ai::Model::FourOmniMini
                 | open_ai::Model::O1Mini
-                | open_ai::Model::O1Preview
+                | open_ai::Model::O1
                 | open_ai::Model::Custom { .. } => {
                     LanguageModelAvailability::RequiresPlan(Plan::ZedPro)
                 }
@@ -88,6 +88,7 @@ impl CloudModel {
             Self::Google(model) => match model {
                 google_ai::Model::Gemini15Pro
                 | google_ai::Model::Gemini15Flash
+                | google_ai::Model::Gemini20Flash
                 | google_ai::Model::Custom { .. } => {
                     LanguageModelAvailability::RequiresPlan(Plan::ZedPro)
                 }

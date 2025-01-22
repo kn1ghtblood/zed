@@ -256,7 +256,7 @@ pub async fn prepare_completion_documentation(
             }
 
             lsp::MarkupKind::Markdown => {
-                let parsed = parse_markdown(value, language_registry, language).await;
+                let parsed = parse_markdown(value, Some(language_registry), language).await;
                 Documentation::MultiLineMarkdown(parsed)
             }
         },
@@ -4019,12 +4019,12 @@ impl BufferSnapshot {
     }
 
     /// Returns an iterator over the diagnostics for the given group.
-    pub fn diagnostic_group<'a, O>(
-        &'a self,
+    pub fn diagnostic_group<O>(
+        &self,
         group_id: usize,
-    ) -> impl 'a + Iterator<Item = DiagnosticEntry<O>>
+    ) -> impl Iterator<Item = DiagnosticEntry<O>> + '_
     where
-        O: 'a + FromAnchor,
+        O: FromAnchor + 'static,
     {
         self.diagnostics
             .iter()

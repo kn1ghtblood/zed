@@ -30,6 +30,7 @@ use std::{
     io,
     ops::Range,
     path::{Path, PathBuf},
+    pin::pin,
     str::FromStr as _,
     sync::Arc,
     time::Instant,
@@ -404,7 +405,7 @@ impl LocalBufferStore {
         cx: &AppContext,
     ) -> Task<Result<Option<String>>> {
         let Some(file) = buffer.read(cx).file() else {
-            return Task::ready(Err(anyhow!("buffer has no file")));
+            return Task::ready(Ok(None));
         };
         let worktree_id = file.worktree_id(cx);
         let path = file.path().clone();
@@ -1483,7 +1484,7 @@ impl BufferStore {
         }
 
         const MAX_CONCURRENT_BUFFER_OPENS: usize = 64;
-        let mut project_paths_rx = self
+        let project_paths_rx = self
             .worktree_store
             .update(cx, |worktree_store, cx| {
                 worktree_store.find_search_candidates(query.clone(), limit, open_buffers, fs, cx)
@@ -1495,6 +1496,7 @@ impl BufferStore {
                 tx.send(buffer).await.ok();
             }
 
+            let mut project_paths_rx = pin!(project_paths_rx);
             while let Some(project_paths) = project_paths_rx.next().await {
                 let buffers = this.update(&mut cx, |this, cx| {
                     project_paths
