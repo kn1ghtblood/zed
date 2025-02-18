@@ -23,11 +23,13 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ::settings::Settings;
+use ::settings::SettingsStore;
 use anyhow::Result;
+use fallback_themes::apply_status_color_defaults;
 use fs::Fs;
 use gpui::{
-    px, AppContext, AssetSource, HighlightStyle, Hsla, Pixels, Refineable, SharedString,
-    WindowAppearance, WindowBackgroundAppearance,
+    px, App, AssetSource, HighlightStyle, Hsla, Pixels, Refineable, SharedString, WindowAppearance,
+    WindowBackgroundAppearance,
 };
 use serde::Deserialize;
 use uuid::Uuid;
@@ -87,7 +89,7 @@ pub enum LoadThemes {
 }
 
 /// Initialize the theme system.
-pub fn init(themes_to_load: LoadThemes, cx: &mut AppContext) {
+pub fn init(themes_to_load: LoadThemes, cx: &mut App) {
     let (assets, load_user_themes) = match themes_to_load {
         LoadThemes::JustBase => (Box::new(()) as Box<dyn AssetSource>, false),
         LoadThemes::All(assets) => (assets, true),
@@ -100,6 +102,16 @@ pub fn init(themes_to_load: LoadThemes, cx: &mut AppContext) {
 
     ThemeSettings::register(cx);
     FontFamilyCache::init_global(cx);
+
+    let mut prev_buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size;
+    cx.observe_global::<SettingsStore>(move |cx| {
+        let buffer_font_size = ThemeSettings::get_global(cx).buffer_font_size;
+        if buffer_font_size != prev_buffer_font_size {
+            prev_buffer_font_size = buffer_font_size;
+            reset_buffer_font_size(cx);
+        }
+    })
+    .detach();
 }
 
 /// Implementing this trait allows accessing the active theme.
@@ -108,7 +120,7 @@ pub trait ActiveTheme {
     fn theme(&self) -> &Arc<Theme>;
 }
 
-impl ActiveTheme for AppContext {
+impl ActiveTheme for App {
     fn theme(&self) -> &Arc<Theme> {
         &ThemeSettings::get_global(self).active_theme
     }
@@ -155,7 +167,9 @@ impl ThemeFamily {
             AppearanceContent::Light => StatusColors::light(),
             AppearanceContent::Dark => StatusColors::dark(),
         };
-        refined_status_colors.refine(&theme.style.status_colors_refinement());
+        let mut status_colors_refinement = theme.style.status_colors_refinement();
+        apply_status_color_defaults(&mut status_colors_refinement);
+        refined_status_colors.refine(&status_colors_refinement);
 
         let mut refined_player_colors = match theme.appearance {
             AppearanceContent::Light => PlayerColors::light(),
