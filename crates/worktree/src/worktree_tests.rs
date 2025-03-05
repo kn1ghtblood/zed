@@ -26,7 +26,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use util::{test::TempTree, ResultExt};
+use util::{path, test::TempTree, ResultExt};
 
 #[gpui::test]
 async fn test_traversal(cx: &mut TestAppContext) {
@@ -1650,7 +1650,7 @@ async fn test_random_worktree_operations_during_initial_scan(
         .map(|o| o.parse().unwrap())
         .unwrap_or(20);
 
-    let root_dir = Path::new("/test");
+    let root_dir = Path::new(path!("/test"));
     let fs = FakeFs::new(cx.background_executor.clone()) as Arc<dyn Fs>;
     fs.as_fake().insert_tree(root_dir, json!({})).await;
     for _ in 0..initial_entries {
@@ -1741,7 +1741,7 @@ async fn test_random_worktree_changes(cx: &mut TestAppContext, mut rng: StdRng) 
         .map(|o| o.parse().unwrap())
         .unwrap_or(20);
 
-    let root_dir = Path::new("/test");
+    let root_dir = Path::new(path!("/test"));
     let fs = FakeFs::new(cx.background_executor.clone()) as Arc<dyn Fs>;
     fs.as_fake().insert_tree(root_dir, json!({})).await;
     for _ in 0..initial_entries {
@@ -2239,6 +2239,73 @@ async fn test_rename_work_directory(cx: &mut TestAppContext) {
             Some(FileStatus::Untracked),
         );
     });
+}
+
+#[gpui::test]
+async fn test_home_dir_as_git_repository(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.executor().allow_parking();
+    let fs = FakeFs::new(cx.background_executor.clone());
+    fs.insert_tree(
+        "/root",
+        json!({
+            "home": {
+                ".git": {},
+                "project": {
+                    "a.txt": "A"
+                },
+            },
+        }),
+    )
+    .await;
+    fs.set_home_dir(Path::new(path!("/root/home")).to_owned());
+
+    let tree = Worktree::local(
+        Path::new(path!("/root/home/project")),
+        true,
+        fs.clone(),
+        Default::default(),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+    tree.flush_fs_events(cx).await;
+
+    tree.read_with(cx, |tree, _cx| {
+        let tree = tree.as_local().unwrap();
+
+        let repo = tree.repository_for_path(path!("a.txt").as_ref());
+        assert!(repo.is_none());
+    });
+
+    let home_tree = Worktree::local(
+        Path::new(path!("/root/home")),
+        true,
+        fs.clone(),
+        Default::default(),
+        &mut cx.to_async(),
+    )
+    .await
+    .unwrap();
+
+    cx.read(|cx| home_tree.read(cx).as_local().unwrap().scan_complete())
+        .await;
+    home_tree.flush_fs_events(cx).await;
+
+    home_tree.read_with(cx, |home_tree, _cx| {
+        let home_tree = home_tree.as_local().unwrap();
+
+        let repo = home_tree.repository_for_path(path!("project/a.txt").as_ref());
+        assert_eq!(
+            repo.map(|repo| &repo.work_directory),
+            Some(&WorkDirectory::InProject {
+                relative_path: Path::new("").into()
+            })
+        );
+    })
 }
 
 #[gpui::test]
