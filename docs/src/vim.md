@@ -105,8 +105,8 @@ Treesitter is a powerful tool that Zed uses to understand the structure of your 
 | A comment                                                  | `g c`            |
 | An argument, or list item, etc.                            | `i a`            |
 | An argument, or list item, etc. (including trailing comma) | `a a`            |
-| Around an HTML-like tag                                    | `i a`            |
-| Inside an HTML-like tag                                    | `i a`            |
+| Around an HTML-like tag                                    | `a t`            |
+| Inside an HTML-like tag                                    | `i t`            |
 | The current indent level, and one line before and after    | `a I`            |
 | The current indent level, and one line before              | `a i`            |
 | The current indent level                                   | `i i`            |
@@ -212,6 +212,7 @@ These ex commands open Zed's various panels and windows.
 | Open the collaboration panel | `:C[ollab]`      |
 | Open the chat panel          | `:Ch[at]`        |
 | Open the AI panel            | `:A[I]`          |
+| Open the git panel           | `:G[it]`         |
 | Open the notifications panel | `:No[tif]`       |
 | Open the feedback window     | `:fe[edback]`    |
 | Open the diagnostics window  | `:cl[ist]`       |
@@ -404,6 +405,22 @@ Vim mode comes with shortcuts to surround the selection in normal mode (`ys`), b
   "context": "vim_mode == visual",
   "bindings": {
     "shift-s": ["vim::PushAddSurrounds", {}]
+  }
+}
+```
+
+In non-modal text editors, cursor navigation typically wraps when moving past line ends. Zed, however, handles this behavior exactly like Vim by default: the cursor stops at line boundaries. If you prefer your cursor to wrap between lines, override these keybindings:
+
+```json
+// In VimScript, this would look like this:
+// set whichwrap+=<,>,[,],h,l
+{
+  "context": "VimControl && !menu",
+  "bindings": {
+    "left": "vim::WrappingLeft",
+    "right": "vim::WrappingRight",
+    "h": "vim::WrappingLeft",
+    "l": "vim::WrappingRight"
   }
 }
 ```

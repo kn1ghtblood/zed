@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use call::{ActiveCall, ParticipantLocation, Room};
-use client::{proto::PeerId, User};
-use gpui::{actions, App, Task, Window};
-use gpui::{canvas, point, AnyElement, Hsla, IntoElement, MouseButton, Path, Styled};
+use client::{User, proto::PeerId};
+use gpui::{AnyElement, Hsla, IntoElement, MouseButton, Path, Styled, canvas, point};
+use gpui::{App, Task, Window, actions};
 use rpc::proto::{self};
 use theme::ActiveTheme;
-use ui::{prelude::*, Avatar, AvatarAudioStatusIndicator, Facepile, TintColor, Tooltip};
+use ui::{Avatar, AvatarAudioStatusIndicator, Facepile, TintColor, Tooltip, prelude::*};
 use workspace::notifications::DetachAndPromptErr;
 
 use crate::TitleBar;
@@ -191,7 +191,6 @@ impl TitleBar {
             )
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn render_collaborator(
         &self,
         user: &Arc<User>,
@@ -220,7 +219,7 @@ impl TitleBar {
                 // When the collaborator is not followed, still draw this wrapper div, but leave
                 // it transparent, so that it does not shift the layout when following.
                 .when_some(leader_selection_color, |div, color| {
-                    div.rounded_md().bg(color)
+                    div.rounded_sm().bg(color)
                 })
                 .child(
                     Facepile::empty()
