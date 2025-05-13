@@ -39,6 +39,7 @@ pub(crate) fn handle_msg(
         WM_CREATE => handle_create_msg(handle, state_ptr),
         WM_MOVE => handle_move_msg(handle, lparam, state_ptr),
         WM_SIZE => handle_size_msg(wparam, lparam, state_ptr),
+        WM_GETMINMAXINFO => handle_get_min_max_info_msg(lparam, state_ptr),
         WM_ENTERSIZEMOVE | WM_ENTERMENULOOP => handle_size_move_loop(handle),
         WM_EXITSIZEMOVE | WM_EXITMENULOOP => handle_size_move_loop_exit(handle),
         WM_TIMER => handle_timer_msg(handle, wparam, state_ptr),
@@ -138,6 +139,29 @@ fn handle_move_msg(
         state_ptr.state.borrow_mut().callbacks.moved = Some(callback);
     }
     Some(0)
+}
+
+fn handle_get_min_max_info_msg(
+    lparam: LPARAM,
+    state_ptr: Rc<WindowsWindowStatePtr>,
+) -> Option<isize> {
+    let lock = state_ptr.state.borrow();
+    if let Some(min_size) = lock.min_size {
+        let scale_factor = lock.scale_factor;
+        let boarder_offset = lock.border_offset;
+        drop(lock);
+
+        unsafe {
+            let minmax_info = &mut *(lparam.0 as *mut MINMAXINFO);
+            minmax_info.ptMinTrackSize.x =
+                min_size.width.scale(scale_factor).0 as i32 + boarder_offset.width_offset;
+            minmax_info.ptMinTrackSize.y =
+                min_size.height.scale(scale_factor).0 as i32 + boarder_offset.height_offset;
+        }
+        Some(0)
+    } else {
+        None
+    }
 }
 
 fn handle_size_msg(
@@ -361,10 +385,6 @@ fn handle_keydown_msg(
         return Some(1);
     };
     let mut lock = state_ptr.state.borrow_mut();
-    let Some(mut func) = lock.callbacks.input.take() else {
-        return Some(1);
-    };
-    drop(lock);
 
     let event = match keystroke_or_modifier {
         KeystrokeOrModifier::Keystroke(keystroke) => PlatformInput::KeyDown(KeyDownEvent {
@@ -372,9 +392,19 @@ fn handle_keydown_msg(
             is_held: lparam.0 & (0x1 << 30) > 0,
         }),
         KeystrokeOrModifier::Modifier(modifiers) => {
+            if let Some(prev_modifiers) = lock.last_reported_modifiers {
+                if prev_modifiers == modifiers {
+                    return Some(0);
+                }
+            }
+            lock.last_reported_modifiers = Some(modifiers);
             PlatformInput::ModifiersChanged(ModifiersChangedEvent { modifiers })
         }
     };
+    let Some(mut func) = lock.callbacks.input.take() else {
+        return Some(1);
+    };
+    drop(lock);
 
     let result = if func(event).default_prevented {
         Some(0)
