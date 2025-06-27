@@ -16,7 +16,7 @@ use futures::channel::oneshot;
 use gpui::{
     Action, App, ClickEvent, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyContext, ParentElement as _, Render, ScrollHandle,
-    Styled, Subscription, Task, TextStyle, Window, actions, div, impl_actions,
+    Styled, Subscription, Task, TextStyle, Window, actions, div,
 };
 use language::{Language, LanguageRegistry};
 use project::{
@@ -46,7 +46,8 @@ use registrar::{ForDeployed, ForDismissed, SearchActionsRegistrar, WithResults};
 
 const MAX_BUFFER_SEARCH_HISTORY_SIZE: usize = 50;
 
-#[derive(PartialEq, Clone, Deserialize, JsonSchema)]
+#[derive(PartialEq, Clone, Deserialize, JsonSchema, Action)]
+#[action(namespace = buffer_search)]
 #[serde(deny_unknown_fields)]
 pub struct Deploy {
     #[serde(default = "util::serde::default_true")]
@@ -56,8 +57,6 @@ pub struct Deploy {
     #[serde(default)]
     pub selection_search_enabled: bool,
 }
-
-impl_actions!(buffer_search, [Deploy]);
 
 actions!(buffer_search, [DeployReplace, Dismiss, FocusEditor]);
 
@@ -696,9 +695,9 @@ impl BufferSearchBar {
                 .read(cx)
                 .as_singleton()
                 .expect("query editor should be backed by a singleton buffer");
-            query_buffer.update(cx, |query_buffer, _| {
-                query_buffer.set_language_registry(languages.clone());
-            });
+            query_buffer
+                .read(cx)
+                .set_language_registry(languages.clone());
 
             cx.spawn(async move |buffer_search_bar, cx| {
                 let regex_language = languages
@@ -1460,7 +1459,6 @@ impl BufferSearchBar {
                             self.select_next_match(&SelectNextMatch, window, cx);
                         }
                         should_propagate = false;
-                        self.focus_editor(&FocusEditor, window, cx);
                     }
                 }
             }
@@ -1693,7 +1691,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(0));
         });
 
@@ -1704,7 +1702,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(1));
         });
 
@@ -1715,7 +1713,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(2));
         });
 
@@ -1726,7 +1724,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(0));
         });
 
@@ -1737,7 +1735,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(2));
         });
 
@@ -1748,7 +1746,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(1));
         });
 
@@ -1759,7 +1757,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(0));
         });
 
@@ -1780,7 +1778,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(0));
         });
 
@@ -1801,7 +1799,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 11)..DisplayPoint::new(DisplayRow(3), 13)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(1));
         });
 
@@ -1822,7 +1820,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(2));
         });
 
@@ -1843,7 +1841,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(0), 41)..DisplayPoint::new(DisplayRow(0), 43)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(0));
         });
 
@@ -1864,7 +1862,7 @@ mod tests {
                 [DisplayPoint::new(DisplayRow(3), 56)..DisplayPoint::new(DisplayRow(3), 58)]
             );
         });
-        search_bar.update(cx, |search_bar, _| {
+        search_bar.read_with(cx, |search_bar, _| {
             assert_eq!(search_bar.active_match_index, Some(2));
         });
     }
@@ -2398,7 +2396,7 @@ mod tests {
             search_bar.replace_all(&ReplaceAll, window, cx)
         });
         assert_eq!(
-            editor.update(cx, |this, cx| { this.text(cx) }),
+            editor.read_with(cx, |this, cx| { this.text(cx) }),
             r#"
         A regular expr$1 (shortened as regex or regexp;[1] also referred to as
         rational expr$1[2][3]) is a sequence of characters that specifies a search
@@ -2424,7 +2422,7 @@ mod tests {
         });
         // Notice how the first or in the text (shORtened) is not replaced. Neither are the remaining hits of `or` in the text.
         assert_eq!(
-            editor.update(cx, |this, cx| { this.text(cx) }),
+            editor.read_with(cx, |this, cx| { this.text(cx) }),
             r#"
         A regular expr$1 (shortened as regex banana regexp;[1] also referred to as
         rational expr$1[2][3]) is a sequence of characters that specifies a search
@@ -2447,7 +2445,7 @@ mod tests {
             search_bar.replace_all(&ReplaceAll, window, cx)
         });
         assert_eq!(
-            editor.update(cx, |this, cx| { this.text(cx) }),
+            editor.read_with(cx, |this, cx| { this.text(cx) }),
             r#"
         A regular expr$1 (shortened as regex banana regexp;1number also referred to as
         rational expr$12number3number) is a sequence of characters that specifies a search
@@ -2477,7 +2475,7 @@ mod tests {
         // The only word affected by this edit should be `algorithms`, even though there's a bunch
         // of words in this text that would match this regex if not for WHOLE_WORD.
         assert_eq!(
-            editor.update(cx, |this, cx| { this.text(cx) }),
+            editor.read_with(cx, |this, cx| { this.text(cx) }),
             r#"
         A regular expr$1 (shortened as regex banana regexp;1number also referred to as
         rational expr$12number3number) is a sequence of characters that specifies a search
@@ -2528,7 +2526,7 @@ mod tests {
         assert_eq!(
             options
                 .editor
-                .update(options.cx, |this, cx| { this.text(cx) }),
+                .read_with(options.cx, |this, cx| { this.text(cx) }),
             options.expected_text
         );
     }

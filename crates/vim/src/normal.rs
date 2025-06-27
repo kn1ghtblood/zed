@@ -24,13 +24,13 @@ use crate::{
 };
 use collections::BTreeSet;
 use convert::ConvertTarget;
-use editor::Anchor;
 use editor::Bias;
 use editor::Editor;
 use editor::scroll::Autoscroll;
+use editor::{Anchor, SelectionEffects};
 use editor::{display_map::ToDisplayPoint, movement};
 use gpui::{Context, Window, actions};
-use language::{Point, SelectionGoal, ToPoint};
+use language::{Point, SelectionGoal};
 use log::error;
 use multi_buffer::MultiBufferRow;
 
@@ -358,13 +358,18 @@ impl Vim {
     ) {
         self.update_editor(window, cx, |_, editor, window, cx| {
             let text_layout_details = editor.text_layout_details(window);
-            editor.change_selections(Some(Autoscroll::fit()), window, cx, |s| {
-                s.move_cursors_with(|map, cursor, goal| {
-                    motion
-                        .move_point(map, cursor, goal, times, &text_layout_details)
-                        .unwrap_or((cursor, goal))
-                })
-            })
+            editor.change_selections(
+                SelectionEffects::default().nav_history(motion.push_to_jump_list()),
+                window,
+                cx,
+                |s| {
+                    s.move_cursors_with(|map, cursor, goal| {
+                        motion
+                            .move_point(map, cursor, goal, times, &text_layout_details)
+                            .unwrap_or((cursor, goal))
+                    })
+                },
+            )
         });
     }
 
@@ -548,6 +553,8 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.record_current_action(cx);
+        let count = Vim::take_count(cx).unwrap_or(1);
+        Vim::take_forced_motion(cx);
         self.update_editor(window, cx, |_, editor, window, cx| {
             editor.transact(window, cx, |editor, _, cx| {
                 let selections = editor.selections.all::<Point>(cx);
@@ -560,7 +567,7 @@ impl Vim {
                     .into_iter()
                     .map(|row| {
                         let start_of_line = Point::new(row, 0);
-                        (start_of_line..start_of_line, "\n".to_string())
+                        (start_of_line..start_of_line, "\n".repeat(count))
                     })
                     .collect::<Vec<_>>();
                 editor.edit(edits, cx);
@@ -575,10 +582,17 @@ impl Vim {
         cx: &mut Context<Self>,
     ) {
         self.record_current_action(cx);
+        let count = Vim::take_count(cx).unwrap_or(1);
+        Vim::take_forced_motion(cx);
         self.update_editor(window, cx, |_, editor, window, cx| {
-            editor.transact(window, cx, |editor, _, cx| {
+            editor.transact(window, cx, |editor, window, cx| {
                 let selections = editor.selections.all::<Point>(cx);
                 let snapshot = editor.buffer().read(cx).snapshot(cx);
+                let (_map, display_selections) = editor.selections.all_display(cx);
+                let original_positions = display_selections
+                    .iter()
+                    .map(|s| (s.id, s.head()))
+                    .collect::<HashMap<_, _>>();
 
                 let selection_end_rows: BTreeSet<u32> = selections
                     .into_iter()
@@ -588,10 +602,18 @@ impl Vim {
                     .into_iter()
                     .map(|row| {
                         let end_of_line = Point::new(row, snapshot.line_len(MultiBufferRow(row)));
-                        (end_of_line..end_of_line, "\n".to_string())
+                        (end_of_line..end_of_line, "\n".repeat(count))
                     })
                     .collect::<Vec<_>>();
                 editor.edit(edits, cx);
+
+                editor.change_selections(None, window, cx, |s| {
+                    s.move_with(|_, selection| {
+                        if let Some(position) = original_positions.get(&selection.id) {
+                            selection.collapse_to(*position, SelectionGoal::None);
+                        }
+                    });
+                });
             });
         });
     }
@@ -641,38 +663,42 @@ impl Vim {
         Vim::take_forced_motion(cx);
         self.update_editor(window, cx, |vim, editor, _window, cx| {
             let selection = editor.selections.newest_anchor();
-            if let Some((_, buffer, _)) = editor.active_excerpt(cx) {
-                let filename = if let Some(file) = buffer.read(cx).file() {
-                    if count.is_some() {
-                        if let Some(local) = file.as_local() {
-                            local.abs_path(cx).to_string_lossy().to_string()
-                        } else {
-                            file.full_path(cx).to_string_lossy().to_string()
-                        }
+            let Some((buffer, point, _)) = editor
+                .buffer()
+                .read(cx)
+                .point_to_buffer_point(selection.head(), cx)
+            else {
+                return;
+            };
+            let filename = if let Some(file) = buffer.read(cx).file() {
+                if count.is_some() {
+                    if let Some(local) = file.as_local() {
+                        local.abs_path(cx).to_string_lossy().to_string()
                     } else {
-                        file.path().to_string_lossy().to_string()
+                        file.full_path(cx).to_string_lossy().to_string()
                     }
                 } else {
-                    "[No Name]".into()
-                };
-                let buffer = buffer.read(cx);
-                let snapshot = buffer.snapshot();
-                let lines = buffer.max_point().row + 1;
-                let current_line = selection.head().text_anchor.to_point(&snapshot).row;
-                let percentage = current_line as f32 / lines as f32;
-                let modified = if buffer.is_dirty() { " [modified]" } else { "" };
-                vim.status_label = Some(
-                    format!(
-                        "{}{} {} lines --{:.0}%--",
-                        filename,
-                        modified,
-                        lines,
-                        percentage * 100.0,
-                    )
-                    .into(),
-                );
-                cx.notify();
-            }
+                    file.path().to_string_lossy().to_string()
+                }
+            } else {
+                "[No Name]".into()
+            };
+            let buffer = buffer.read(cx);
+            let lines = buffer.max_point().row + 1;
+            let current_line = point.row;
+            let percentage = current_line as f32 / lines as f32;
+            let modified = if buffer.is_dirty() { " [modified]" } else { "" };
+            vim.status_label = Some(
+                format!(
+                    "{}{} {} lines --{:.0}%--",
+                    filename,
+                    modified,
+                    lines,
+                    percentage * 100.0,
+                )
+                .into(),
+            );
+            cx.notify();
         });
     }
 
@@ -1331,10 +1357,19 @@ mod test {
     }
 
     #[gpui::test]
-    async fn test_insert_empty_line_above(cx: &mut gpui::TestAppContext) {
+    async fn test_insert_empty_line(cx: &mut gpui::TestAppContext) {
         let mut cx = NeovimBackedTestContext::new(cx).await;
         cx.simulate("[ space", "ˇ").await.assert_matches();
         cx.simulate("[ space", "The ˇquick").await.assert_matches();
+        cx.simulate_at_each_offset(
+            "3 [ space",
+            indoc! {"
+            The qˇuick
+            brown ˇfox
+            jumps ˇover"},
+        )
+        .await
+        .assert_matches();
         cx.simulate_at_each_offset(
             "[ space",
             indoc! {"
@@ -1346,6 +1381,36 @@ mod test {
         .assert_matches();
         cx.simulate(
             "[ space",
+            indoc! {"
+            The quick
+            ˇ
+            brown fox"},
+        )
+        .await
+        .assert_matches();
+
+        cx.simulate("] space", "ˇ").await.assert_matches();
+        cx.simulate("] space", "The ˇquick").await.assert_matches();
+        cx.simulate_at_each_offset(
+            "3 ] space",
+            indoc! {"
+            The qˇuick
+            brown ˇfox
+            jumps ˇover"},
+        )
+        .await
+        .assert_matches();
+        cx.simulate_at_each_offset(
+            "] space",
+            indoc! {"
+            The qˇuick
+            brown ˇfox
+            jumps ˇover"},
+        )
+        .await
+        .assert_matches();
+        cx.simulate(
+            "] space",
             indoc! {"
             The quick
             ˇ
@@ -1474,90 +1539,6 @@ mod test {
                 .await
                 .assert_matches();
         }
-    }
-
-    #[gpui::test]
-    async fn test_f_and_t_multiline(cx: &mut gpui::TestAppContext) {
-        let mut cx = VimTestContext::new(cx, true).await;
-        cx.update_global(|store: &mut SettingsStore, cx| {
-            store.update_user_settings::<VimSettings>(cx, |s| {
-                s.use_multiline_find = Some(true);
-            });
-        });
-
-        cx.assert_binding(
-            "f l",
-            indoc! {"
-            ˇfunction print() {
-                console.log('ok')
-            }
-            "},
-            Mode::Normal,
-            indoc! {"
-            function print() {
-                consoˇle.log('ok')
-            }
-            "},
-            Mode::Normal,
-        );
-
-        cx.assert_binding(
-            "t l",
-            indoc! {"
-            ˇfunction print() {
-                console.log('ok')
-            }
-            "},
-            Mode::Normal,
-            indoc! {"
-            function print() {
-                consˇole.log('ok')
-            }
-            "},
-            Mode::Normal,
-        );
-    }
-
-    #[gpui::test]
-    async fn test_capital_f_and_capital_t_multiline(cx: &mut gpui::TestAppContext) {
-        let mut cx = VimTestContext::new(cx, true).await;
-        cx.update_global(|store: &mut SettingsStore, cx| {
-            store.update_user_settings::<VimSettings>(cx, |s| {
-                s.use_multiline_find = Some(true);
-            });
-        });
-
-        cx.assert_binding(
-            "shift-f p",
-            indoc! {"
-            function print() {
-                console.ˇlog('ok')
-            }
-            "},
-            Mode::Normal,
-            indoc! {"
-            function ˇprint() {
-                console.log('ok')
-            }
-            "},
-            Mode::Normal,
-        );
-
-        cx.assert_binding(
-            "shift-t p",
-            indoc! {"
-            function print() {
-                console.ˇlog('ok')
-            }
-            "},
-            Mode::Normal,
-            indoc! {"
-            function pˇrint() {
-                console.log('ok')
-            }
-            "},
-            Mode::Normal,
-        );
     }
 
     #[gpui::test]
@@ -1826,5 +1807,36 @@ mod test {
             The quick brown
             fox jˇumps over
             the lazy dog"});
+    }
+
+    #[gpui::test]
+    async fn test_jump_list(cx: &mut gpui::TestAppContext) {
+        let mut cx = NeovimBackedTestContext::new(cx).await;
+
+        cx.set_shared_state(indoc! {"
+            ˇfn a() { }
+
+
+
+
+
+            fn b() { }
+
+
+
+
+
+            fn b() { }"})
+            .await;
+        cx.simulate_shared_keystrokes("3 }").await;
+        cx.shared_state().await.assert_matches();
+        cx.simulate_shared_keystrokes("ctrl-o").await;
+        cx.shared_state().await.assert_matches();
+        cx.simulate_shared_keystrokes("ctrl-i").await;
+        cx.shared_state().await.assert_matches();
+        cx.simulate_shared_keystrokes("1 1 k").await;
+        cx.shared_state().await.assert_matches();
+        cx.simulate_shared_keystrokes("ctrl-o").await;
+        cx.shared_state().await.assert_matches();
     }
 }
