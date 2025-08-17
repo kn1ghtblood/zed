@@ -1,9 +1,7 @@
 use crate::context_picker::{ContextPicker, MentionLink};
 use crate::context_strip::{ContextStrip, ContextStripEvent, SuggestContextKind};
 use crate::message_editor::{extract_message_creases, insert_message_creases};
-use crate::ui::{
-    AddedContext, AgentNotification, AgentNotificationEvent, AnimatedLabel, ContextPill,
-};
+use crate::ui::{AddedContext, AgentNotification, AgentNotificationEvent, ContextPill};
 use crate::{AgentPanel, ModelUsageContext};
 use agent::{
     ContextStore, LastRestoreCheckpoint, MessageCrease, MessageId, MessageSegment, TextThreadStore,
@@ -16,10 +14,11 @@ use agent_settings::{AgentSettings, NotifyWhenAgentWaiting};
 use anyhow::Context as _;
 use assistant_tool::ToolUseStatus;
 use audio::{Audio, Sound};
+use cloud_llm_client::CompletionIntent;
 use collections::{HashMap, HashSet};
 use editor::actions::{MoveUp, Paste};
 use editor::scroll::Autoscroll;
-use editor::{Editor, EditorElement, EditorEvent, EditorStyle, MultiBuffer};
+use editor::{Editor, EditorElement, EditorEvent, EditorStyle, MultiBuffer, SelectionEffects};
 use gpui::{
     AbsoluteLength, Animation, AnimationExt, AnyElement, App, ClickEvent, ClipboardEntry,
     ClipboardItem, DefiniteLength, EdgesRefinement, Empty, Entity, EventEmitter, Focusable, Hsla,
@@ -47,17 +46,17 @@ use std::time::Duration;
 use text::ToPoint;
 use theme::ThemeSettings;
 use ui::{
-    Disclosure, KeyBinding, PopoverMenuHandle, Scrollbar, ScrollbarState, TextSize, Tooltip,
-    prelude::*,
+    Banner, Disclosure, KeyBinding, PopoverMenuHandle, Scrollbar, ScrollbarState, TextSize,
+    Tooltip, prelude::*,
 };
 use util::ResultExt as _;
 use util::markdown::MarkdownCodeBlock;
 use workspace::{CollaboratorId, Workspace};
 use zed_actions::assistant::OpenRulesLibrary;
-use zed_llm_client::CompletionIntent;
 
 const CODEBLOCK_CONTAINER_GROUP: &str = "codeblock_container";
 const EDIT_PREVIOUS_MESSAGE_MIN_LINES: usize = 1;
+const RESPONSE_PADDING_X: Pixels = px(19.);
 
 pub struct ActiveThread {
     context_store: Entity<ContextStore>,
@@ -70,8 +69,6 @@ pub struct ActiveThread {
     messages: Vec<MessageId>,
     list_state: ListState,
     scrollbar_state: ScrollbarState,
-    show_scrollbar: bool,
-    hide_scrollbar_task: Option<Task<()>>,
     rendered_messages_by_id: HashMap<MessageId, RenderedMessage>,
     rendered_tool_uses: HashMap<LanguageModelToolUseId, RenderedToolUse>,
     editing_message: Option<(MessageId, EditingMessageState)>,
@@ -204,7 +201,7 @@ pub(crate) fn default_markdown_style(window: &Window, cx: &App) -> MarkdownStyle
     MarkdownStyle {
         base_text_style: text_style.clone(),
         syntax: cx.theme().syntax().clone(),
-        selection_background_color: cx.theme().players().local().selection,
+        selection_background_color: cx.theme().colors().element_selection_background,
         code_block_overflow_x_scroll: true,
         table_overflow_x_scroll: true,
         heading_level_styles: Some(HeadingLevelStyles {
@@ -301,7 +298,7 @@ fn tool_use_markdown_style(window: &Window, cx: &mut App) -> MarkdownStyle {
     MarkdownStyle {
         base_text_style: text_style,
         syntax: cx.theme().syntax().clone(),
-        selection_background_color: cx.theme().players().local().selection,
+        selection_background_color: cx.theme().colors().element_selection_background,
         code_block_overflow_x_scroll: false,
         code_block: StyleRefinement {
             margin: EdgesRefinement::default(),
@@ -437,7 +434,7 @@ fn render_markdown_code_block(
                             .child(content)
                             .child(
                                 Icon::new(IconName::ArrowUpRight)
-                                    .size(IconSize::XSmall)
+                                    .size(IconSize::Small)
                                     .color(Color::Ignored),
                             ),
                     )
@@ -689,9 +686,12 @@ fn open_markdown_link(
                             })
                             .context("Could not find matching symbol")?;
 
-                        editor.change_selections(Some(Autoscroll::center()), window, cx, |s| {
-                            s.select_anchor_ranges([symbol_range.start..symbol_range.start])
-                        });
+                        editor.change_selections(
+                            SelectionEffects::scroll(Autoscroll::center()),
+                            window,
+                            cx,
+                            |s| s.select_anchor_ranges([symbol_range.start..symbol_range.start]),
+                        );
                         anyhow::Ok(())
                     })
                 })
@@ -708,10 +708,15 @@ fn open_markdown_link(
                         .downcast::<Editor>()
                         .context("Item is not an editor")?;
                     active_editor.update_in(cx, |editor, window, cx| {
-                        editor.change_selections(Some(Autoscroll::center()), window, cx, |s| {
-                            s.select_ranges([Point::new(line_range.start as u32, 0)
-                                ..Point::new(line_range.start as u32, 0)])
-                        });
+                        editor.change_selections(
+                            SelectionEffects::scroll(Autoscroll::center()),
+                            window,
+                            cx,
+                            |s| {
+                                s.select_ranges([Point::new(line_range.start as u32, 0)
+                                    ..Point::new(line_range.start as u32, 0)])
+                            },
+                        );
                         anyhow::Ok(())
                     })
                 })
@@ -773,13 +778,16 @@ impl ActiveThread {
             cx.observe_global::<SettingsStore>(|_, cx| cx.notify()),
         ];
 
-        let list_state = ListState::new(0, ListAlignment::Bottom, px(2048.), {
-            let this = cx.entity().downgrade();
-            move |ix, window: &mut Window, cx: &mut App| {
-                this.update(cx, |this, cx| this.render_message(ix, window, cx))
-                    .unwrap()
-            }
-        });
+        let list_state = ListState::new(0, ListAlignment::Bottom, px(2048.));
+
+        let workspace_subscription = if let Some(workspace) = workspace.upgrade() {
+            Some(cx.observe_release(&workspace, |this, _, cx| {
+                this.dismiss_notifications(cx);
+            }))
+        } else {
+            None
+        };
+
         let mut this = Self {
             language_registry,
             thread_store,
@@ -795,9 +803,7 @@ impl ActiveThread {
             expanded_thinking_segments: HashMap::default(),
             expanded_code_blocks: HashMap::default(),
             list_state: list_state.clone(),
-            scrollbar_state: ScrollbarState::new(list_state),
-            show_scrollbar: false,
-            hide_scrollbar_task: None,
+            scrollbar_state: ScrollbarState::new(list_state).parent_entity(&cx.entity()),
             editing_message: None,
             last_error: None,
             copied_code_block_ids: HashSet::default(),
@@ -825,6 +831,10 @@ impl ActiveThread {
                     cx,
                 );
             }
+        }
+
+        if let Some(subscription) = workspace_subscription {
+            this._subscriptions.push(subscription);
         }
 
         this
@@ -976,30 +986,57 @@ impl ActiveThread {
             | ThreadEvent::SummaryChanged => {
                 self.save_thread(cx);
             }
-            ThreadEvent::Stopped(reason) => match reason {
-                Ok(StopReason::EndTurn | StopReason::MaxTokens) => {
-                    let used_tools = self.thread.read(cx).used_tools_since_last_user_message();
-                    self.play_notification_sound(window, cx);
-                    self.show_notification(
-                        if used_tools {
-                            "Finished running tools"
-                        } else {
-                            "New message"
-                        },
-                        IconName::ZedAssistant,
-                        window,
-                        cx,
-                    );
+            ThreadEvent::Stopped(reason) => {
+                match reason {
+                    Ok(StopReason::EndTurn | StopReason::MaxTokens) => {
+                        let used_tools = self.thread.read(cx).used_tools_since_last_user_message();
+                        self.notify_with_sound(
+                            if used_tools {
+                                "Finished running tools"
+                            } else {
+                                "New message"
+                            },
+                            IconName::ZedAssistant,
+                            window,
+                            cx,
+                        );
+                    }
+                    Ok(StopReason::ToolUse) => {
+                        // Don't notify for intermediate tool use
+                    }
+                    Ok(StopReason::Refusal) => {
+                        self.notify_with_sound(
+                            "Language model refused to respond",
+                            IconName::Warning,
+                            window,
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        self.notify_with_sound(
+                            "Agent stopped due to an error",
+                            IconName::Warning,
+                            window,
+                            cx,
+                        );
+
+                        let error_message = error
+                            .chain()
+                            .map(|err| err.to_string())
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        self.last_error = Some(ThreadError::Message {
+                            header: "Error".into(),
+                            message: error_message.into(),
+                        });
+                    }
                 }
-                _ => {}
-            },
+            }
             ThreadEvent::ToolConfirmationNeeded => {
-                self.play_notification_sound(window, cx);
-                self.show_notification("Waiting for tool confirmation", IconName::Info, window, cx);
+                self.notify_with_sound("Waiting for tool confirmation", IconName::Info, window, cx);
             }
             ThreadEvent::ToolUseLimitReached => {
-                self.play_notification_sound(window, cx);
-                self.show_notification(
+                self.notify_with_sound(
                     "Consecutive tool use limit reached.",
                     IconName::Warning,
                     window,
@@ -1017,6 +1054,7 @@ impl ActiveThread {
                 }
             }
             ThreadEvent::MessageAdded(message_id) => {
+                self.clear_last_error();
                 if let Some(rendered_message) = self.thread.update(cx, |thread, cx| {
                     thread.message(*message_id).map(|message| {
                         RenderedMessage::from_segments(
@@ -1033,6 +1071,7 @@ impl ActiveThread {
                 cx.notify();
             }
             ThreadEvent::MessageEdited(message_id) => {
+                self.clear_last_error();
                 if let Some(index) = self.messages.iter().position(|id| id == message_id) {
                     if let Some(rendered_message) = self.thread.update(cx, |thread, cx| {
                         thread.message(*message_id).map(|message| {
@@ -1140,9 +1179,6 @@ impl ActiveThread {
                 self.save_thread(cx);
                 cx.notify();
             }
-            ThreadEvent::RetriesFailed { message } => {
-                self.show_notification(message, ui::IconName::Warning, window, cx);
-            }
         }
     }
 
@@ -1195,6 +1231,17 @@ impl ActiveThread {
                 // Don't show anything
             }
         }
+    }
+
+    fn notify_with_sound(
+        &mut self,
+        caption: impl Into<SharedString>,
+        icon: IconName,
+        window: &mut Window,
+        cx: &mut Context<ActiveThread>,
+    ) {
+        self.play_notification_sound(window, cx);
+        self.show_notification(caption, icon, window, cx);
     }
 
     fn pop_up(
@@ -1452,6 +1499,7 @@ impl ActiveThread {
                             &configured_model.model,
                             cx,
                         ),
+                        thinking_allowed: true,
                     };
 
                     Some(configured_model.model.count_tokens(request, cx))
@@ -1788,7 +1836,12 @@ impl ActiveThread {
             )))
     }
 
-    fn render_message(&self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    fn render_message(
+        &mut self,
+        ix: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let message_id = self.messages[ix];
         let workspace = self.workspace.clone();
         let thread = self.thread.read(cx);
@@ -1809,7 +1862,7 @@ impl ActiveThread {
                 .my_3()
                 .mx_5()
                 .when(is_generating_stale || message.is_hidden, |this| {
-                    this.child(AnimatedLabel::new("").size(LabelSize::Small))
+                    this.child(LoadingLabel::new("").size(LabelSize::Small))
                 })
         });
 
@@ -1843,8 +1896,9 @@ impl ActiveThread {
             (colors.editor_background, colors.panel_background)
         };
 
-        let open_as_markdown = IconButton::new(("open-as-markdown", ix), IconName::DocumentText)
-            .icon_size(IconSize::XSmall)
+        let open_as_markdown = IconButton::new(("open-as-markdown", ix), IconName::FileMarkdown)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Small)
             .icon_color(Color::Ignored)
             .tooltip(Tooltip::text("Open Thread as Markdown"))
             .on_click({
@@ -1858,16 +1912,14 @@ impl ActiveThread {
                 }
             });
 
-        let scroll_to_top = IconButton::new(("scroll_to_top", ix), IconName::ArrowUpAlt)
-            .icon_size(IconSize::XSmall)
+        let scroll_to_top = IconButton::new(("scroll_to_top", ix), IconName::ArrowUp)
+            .shape(ui::IconButtonShape::Square)
+            .icon_size(IconSize::Small)
             .icon_color(Color::Ignored)
             .tooltip(Tooltip::text("Scroll To Top"))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.scroll_to_top(cx);
             }));
-
-        // For all items that should be aligned with the LLM's response.
-        const RESPONSE_PADDING_X: Pixels = px(19.);
 
         let show_feedback = thread.is_turn_end(ix);
         let feedback_container = h_flex()
@@ -1876,6 +1928,7 @@ impl ActiveThread {
             .py_2()
             .px(RESPONSE_PADDING_X)
             .mr_1()
+            .gap_1()
             .opacity(0.4)
             .hover(|style| style.opacity(1.))
             .gap_1p5()
@@ -1899,7 +1952,8 @@ impl ActiveThread {
                     h_flex()
                         .child(
                             IconButton::new(("feedback-thumbs-up", ix), IconName::ThumbsUp)
-                                .icon_size(IconSize::XSmall)
+                                .shape(ui::IconButtonShape::Square)
+                                .icon_size(IconSize::Small)
                                 .icon_color(match feedback {
                                     ThreadFeedback::Positive => Color::Accent,
                                     ThreadFeedback::Negative => Color::Ignored,
@@ -1916,7 +1970,8 @@ impl ActiveThread {
                         )
                         .child(
                             IconButton::new(("feedback-thumbs-down", ix), IconName::ThumbsDown)
-                                .icon_size(IconSize::XSmall)
+                                .shape(ui::IconButtonShape::Square)
+                                .icon_size(IconSize::Small)
                                 .icon_color(match feedback {
                                     ThreadFeedback::Positive => Color::Ignored,
                                     ThreadFeedback::Negative => Color::Accent,
@@ -1949,7 +2004,8 @@ impl ActiveThread {
                     h_flex()
                         .child(
                             IconButton::new(("feedback-thumbs-up", ix), IconName::ThumbsUp)
-                                .icon_size(IconSize::XSmall)
+                                .shape(ui::IconButtonShape::Square)
+                                .icon_size(IconSize::Small)
                                 .icon_color(Color::Ignored)
                                 .tooltip(Tooltip::text("Helpful Response"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -1963,7 +2019,8 @@ impl ActiveThread {
                         )
                         .child(
                             IconButton::new(("feedback-thumbs-down", ix), IconName::ThumbsDown)
-                                .icon_size(IconSize::XSmall)
+                                .shape(ui::IconButtonShape::Square)
+                                .icon_size(IconSize::Small)
                                 .icon_color(Color::Ignored)
                                 .tooltip(Tooltip::text("Not Helpful"))
                                 .on_click(cx.listener(move |this, _, window, cx| {
@@ -2529,34 +2586,18 @@ impl ActiveThread {
         ix: usize,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
-        let colors = cx.theme().colors();
-        div().id(("message-container", ix)).py_1().px_2().child(
-            v_flex()
-                .w_full()
-                .bg(colors.editor_background)
-                .rounded_sm()
-                .child(
-                    h_flex()
-                        .w_full()
-                        .p_2()
-                        .gap_2()
-                        .child(
-                            div().flex_none().child(
-                                Icon::new(IconName::Warning)
-                                    .size(IconSize::Small)
-                                    .color(Color::Warning),
-                            ),
-                        )
-                        .child(
-                            v_flex()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(TextSize::Small.rems(cx))
-                                .text_color(cx.theme().colors().text_muted)
-                                .children(message_content),
-                        ),
-                ),
-        )
+        let message = div()
+            .flex_1()
+            .min_w_0()
+            .text_size(TextSize::XSmall.rems(cx))
+            .text_color(cx.theme().colors().text_muted)
+            .children(message_content);
+
+        div()
+            .id(("message-container", ix))
+            .py_1()
+            .px_2p5()
+            .child(Banner::new().severity(ui::Severity::Warning).child(message))
     }
 
     fn render_message_thinking_segment(
@@ -2590,11 +2631,11 @@ impl ActiveThread {
                                 h_flex()
                                     .gap_1p5()
                                     .child(
-                                        Icon::new(IconName::LightBulb)
-                                            .size(IconSize::XSmall)
+                                        Icon::new(IconName::ToolThink)
+                                            .size(IconSize::Small)
                                             .color(Color::Muted),
                                     )
-                                    .child(AnimatedLabel::new("Thinking").size(LabelSize::Small)),
+                                    .child(LoadingLabel::new("Thinking").size(LabelSize::Small)),
                             )
                             .child(
                                 h_flex()
@@ -2716,7 +2757,7 @@ impl ActiveThread {
                                 h_flex()
                                     .gap_1p5()
                                     .child(
-                                        Icon::new(IconName::LightBulb)
+                                        Icon::new(IconName::ToolThink)
                                             .size(IconSize::XSmall)
                                             .color(Color::Muted),
                                     )
@@ -3004,7 +3045,7 @@ impl ActiveThread {
                                         .overflow_x_scroll()
                                         .child(
                                             Icon::new(tool_use.icon)
-                                                .size(IconSize::XSmall)
+                                                .size(IconSize::Small)
                                                 .color(Color::Muted),
                                         )
                                         .child(
@@ -3163,7 +3204,10 @@ impl ActiveThread {
                                 .border_color(self.tool_card_border_color(cx))
                                 .rounded_b_lg()
                                 .child(
-                                    AnimatedLabel::new("Waiting for Confirmation").size(LabelSize::Small)
+                                    div()
+                                        .min_w(rems_from_px(145.))
+                                        .child(LoadingLabel::new("Waiting for Confirmation").size(LabelSize::Small)
+                                    )
                                 )
                                 .child(
                                     h_flex()
@@ -3208,7 +3252,6 @@ impl ActiveThread {
                                                 },
                                             ))
                                         })
-                                        .child(ui::Divider::vertical())
                                         .child({
                                             let tool_id = tool_use.id.clone();
                                             Button::new("allow-tool-action", "Allow")
@@ -3326,7 +3369,7 @@ impl ActiveThread {
                                 .mr_0p5(),
                         )
                         .child(
-                            IconButton::new("open-prompt-library", IconName::ArrowUpRightAlt)
+                            IconButton::new("open-prompt-library", IconName::ArrowUpRight)
                                 .shape(ui::IconButtonShape::Square)
                                 .icon_size(IconSize::XSmall)
                                 .icon_color(Color::Ignored)
@@ -3361,7 +3404,7 @@ impl ActiveThread {
                                 .mr_0p5(),
                         )
                         .child(
-                            IconButton::new("open-rule", IconName::ArrowUpRightAlt)
+                            IconButton::new("open-rule", IconName::ArrowUpRight)
                                 .shape(ui::IconButtonShape::Square)
                                 .icon_size(IconSize::XSmall)
                                 .icon_color(Color::Ignored)
@@ -3462,60 +3505,37 @@ impl ActiveThread {
         }
     }
 
-    fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Option<Stateful<Div>> {
-        if !self.show_scrollbar && !self.scrollbar_state.is_dragging() {
-            return None;
-        }
-
-        Some(
-            div()
-                .occlude()
-                .id("active-thread-scrollbar")
-                .on_mouse_move(cx.listener(|_, _, _, cx| {
-                    cx.notify();
-                    cx.stop_propagation()
-                }))
-                .on_hover(|_, _, cx| {
+    fn render_vertical_scrollbar(&self, cx: &mut Context<Self>) -> Stateful<Div> {
+        div()
+            .occlude()
+            .id("active-thread-scrollbar")
+            .on_mouse_move(cx.listener(|_, _, _, cx| {
+                cx.notify();
+                cx.stop_propagation()
+            }))
+            .on_hover(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_any_mouse_down(|_, _, cx| {
+                cx.stop_propagation();
+            })
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|_, _, _, cx| {
                     cx.stop_propagation();
-                })
-                .on_any_mouse_down(|_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .on_mouse_up(
-                    MouseButton::Left,
-                    cx.listener(|_, _, _, cx| {
-                        cx.stop_propagation();
-                    }),
-                )
-                .on_scroll_wheel(cx.listener(|_, _, _, cx| {
-                    cx.notify();
-                }))
-                .h_full()
-                .absolute()
-                .right_1()
-                .top_1()
-                .bottom_0()
-                .w(px(12.))
-                .cursor_default()
-                .children(Scrollbar::vertical(self.scrollbar_state.clone())),
-        )
-    }
-
-    fn hide_scrollbar_later(&mut self, cx: &mut Context<Self>) {
-        const SCROLLBAR_SHOW_INTERVAL: Duration = Duration::from_secs(1);
-        self.hide_scrollbar_task = Some(cx.spawn(async move |thread, cx| {
-            cx.background_executor()
-                .timer(SCROLLBAR_SHOW_INTERVAL)
-                .await;
-            thread
-                .update(cx, |thread, cx| {
-                    if !thread.scrollbar_state.is_dragging() {
-                        thread.show_scrollbar = false;
-                        cx.notify();
-                    }
-                })
-                .log_err();
-        }))
+                }),
+            )
+            .on_scroll_wheel(cx.listener(|_, _, _, cx| {
+                cx.notify();
+            }))
+            .h_full()
+            .absolute()
+            .right_1()
+            .top_1()
+            .bottom_0()
+            .w(px(12.))
+            .cursor_default()
+            .children(Scrollbar::vertical(self.scrollbar_state.clone()).map(|s| s.auto_hide(cx)))
     }
 
     pub fn is_codeblock_expanded(&self, message_id: MessageId, ix: usize) -> bool {
@@ -3556,26 +3576,8 @@ impl Render for ActiveThread {
             .size_full()
             .relative()
             .bg(cx.theme().colors().panel_background)
-            .on_mouse_move(cx.listener(|this, _, _, cx| {
-                this.show_scrollbar = true;
-                this.hide_scrollbar_later(cx);
-                cx.notify();
-            }))
-            .on_scroll_wheel(cx.listener(|this, _, _, cx| {
-                this.show_scrollbar = true;
-                this.hide_scrollbar_later(cx);
-                cx.notify();
-            }))
-            .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
-                    this.hide_scrollbar_later(cx);
-                }),
-            )
-            .child(list(self.list_state.clone()).flex_grow())
-            .when_some(self.render_vertical_scrollbar(cx), |this, scrollbar| {
-                this.child(scrollbar)
-            })
+            .child(list(self.list_state.clone(), cx.processor(Self::render_message)).flex_grow())
+            .child(self.render_vertical_scrollbar(cx))
     }
 }
 
@@ -3683,8 +3685,11 @@ pub(crate) fn open_context(
 
         AgentContextHandle::Thread(thread_context) => workspace.update(cx, |workspace, cx| {
             if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                panel.update(cx, |panel, cx| {
-                    panel.open_thread(thread_context.thread.clone(), window, cx);
+                let thread = thread_context.thread.clone();
+                window.defer(cx, move |window, cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.open_thread(thread, window, cx);
+                    });
                 });
             }
         }),
@@ -3692,8 +3697,11 @@ pub(crate) fn open_context(
         AgentContextHandle::TextThread(text_thread_context) => {
             workspace.update(cx, |workspace, cx| {
                 if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
-                    panel.update(cx, |panel, cx| {
-                        panel.open_prompt_editor(text_thread_context.context.clone(), window, cx)
+                    let context = text_thread_context.context.clone();
+                    window.defer(cx, move |window, cx| {
+                        panel.update(cx, |panel, cx| {
+                            panel.open_prompt_editor(context, window, cx)
+                        });
                     });
                 }
             })
@@ -3848,7 +3856,7 @@ mod tests {
             LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
                 registry.set_default_model(
                     Some(ConfiguredModel {
-                        provider: Arc::new(FakeLanguageModelProvider),
+                        provider: Arc::new(FakeLanguageModelProvider::default()),
                         model,
                     }),
                     cx,
@@ -3932,7 +3940,7 @@ mod tests {
             LanguageModelRegistry::global(cx).update(cx, |registry, cx| {
                 registry.set_default_model(
                     Some(ConfiguredModel {
-                        provider: Arc::new(FakeLanguageModelProvider),
+                        provider: Arc::new(FakeLanguageModelProvider::default()),
                         model: model.clone(),
                     }),
                     cx,

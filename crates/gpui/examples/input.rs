@@ -487,7 +487,7 @@ impl Element for TextElement {
         let font_size = style.font_size.to_pixels(window.rem_size());
         let line = window
             .text_system()
-            .shape_line(display_text, font_size, &runs);
+            .shape_line(display_text, font_size, &runs, None);
 
         let cursor_pos = line.x_for_index(cursor);
         let (selection, cursor) = if selected_range.is_empty() {
@@ -595,9 +595,7 @@ impl Render for TextInput {
                     .w_full()
                     .p(px(4.))
                     .bg(white())
-                    .child(TextElement {
-                        input: cx.entity().clone(),
-                    }),
+                    .child(TextElement { input: cx.entity() }),
             )
     }
 }

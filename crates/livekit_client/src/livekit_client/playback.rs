@@ -1,6 +1,6 @@
 use anyhow::{Context as _, Result};
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait as _};
+use cpal::traits::{DeviceTrait, StreamTrait as _};
 use futures::channel::mpsc::UnboundedSender;
 use futures::{Stream, StreamExt as _};
 use gpui::{
@@ -165,7 +165,7 @@ impl AudioStack {
     ) -> Result<()> {
         loop {
             let mut device_change_listener = DeviceChangeListener::new(false)?;
-            let (output_device, output_config) = default_device(false)?;
+            let (output_device, output_config) = crate::default_device(false)?;
             let (end_on_drop_tx, end_on_drop_rx) = std::sync::mpsc::channel::<()>();
             let mixer = mixer.clone();
             let apm = apm.clone();
@@ -237,7 +237,7 @@ impl AudioStack {
     ) -> Result<()> {
         loop {
             let mut device_change_listener = DeviceChangeListener::new(true)?;
-            let (device, config) = default_device(true)?;
+            let (device, config) = crate::default_device(true)?;
             let (end_on_drop_tx, end_on_drop_rx) = std::sync::mpsc::channel::<()>();
             let apm = apm.clone();
             let frame_tx = frame_tx.clone();
@@ -258,9 +258,15 @@ impl AudioStack {
                     let stream = device
                         .build_input_stream_raw(
                             &config.config(),
-                            cpal::SampleFormat::I16,
+                            config.sample_format(),
                             move |data, _: &_| {
-                                let mut data = data.as_slice::<i16>().unwrap();
+                                let data =
+                                    crate::get_sample_data(config.sample_format(), data).log_err();
+                                let Some(data) = data else {
+                                    return;
+                                };
+                                let mut data = data.as_slice();
+
                                 while data.len() > 0 {
                                     let remainder = (buf.capacity() - buf.len()).min(data.len());
                                     buf.extend_from_slice(&data[..remainder]);
@@ -326,11 +332,11 @@ pub(crate) async fn capture_local_video_track(
     capture_source: &dyn ScreenCaptureSource,
     cx: &mut gpui::AsyncApp,
 ) -> Result<(crate::LocalVideoTrack, Box<dyn ScreenCaptureStream>)> {
-    let resolution = capture_source.resolution()?;
+    let metadata = capture_source.metadata()?;
     let track_source = gpui_tokio::Tokio::spawn(cx, async move {
         NativeVideoSource::new(VideoResolution {
-            width: resolution.width.0 as u32,
-            height: resolution.height.0 as u32,
+            width: metadata.resolution.width.0 as u32,
+            height: metadata.resolution.height.0 as u32,
         })
     })?
     .await?;
@@ -357,27 +363,6 @@ pub(crate) async fn capture_local_video_track(
         )),
         capture_stream,
     ))
-}
-
-fn default_device(input: bool) -> Result<(cpal::Device, cpal::SupportedStreamConfig)> {
-    let device;
-    let config;
-    if input {
-        device = cpal::default_host()
-            .default_input_device()
-            .context("no audio input device available")?;
-        config = device
-            .default_input_config()
-            .context("failed to get default input config")?;
-    } else {
-        device = cpal::default_host()
-            .default_output_device()
-            .context("no audio output device available")?;
-        config = device
-            .default_output_config()
-            .context("failed to get default output config")?;
-    }
-    Ok((device, config))
 }
 
 #[derive(Clone)]
@@ -585,10 +570,10 @@ fn video_frame_buffer_from_webrtc(buffer: Box<dyn VideoBuffer>) -> Option<Remote
         if start_ptr.is_null() {
             return None;
         }
-        let bgra_frame_slice = std::slice::from_raw_parts_mut(start_ptr, byte_len);
+        let argb_frame_slice = std::slice::from_raw_parts_mut(start_ptr, byte_len);
         buffer.to_argb(
-            VideoFormatType::ARGB, // For some reason, this displays correctly while RGBA (the correct format) does not
-            bgra_frame_slice,
+            VideoFormatType::ARGB,
+            argb_frame_slice,
             stride,
             width as i32,
             height as i32,
@@ -596,12 +581,13 @@ fn video_frame_buffer_from_webrtc(buffer: Box<dyn VideoBuffer>) -> Option<Remote
         Vec::from_raw_parts(start_ptr, byte_len, byte_len)
     };
 
+    // TODO: Unclear why providing argb_image to RgbaImage works properly.
+    let image = RgbaImage::from_raw(width, height, argb_image)
+        .with_context(|| "Bug: not enough bytes allocated for image.")
+        .log_err()?;
+
     Some(Arc::new(RenderImage::new(SmallVec::from_elem(
-        Frame::new(
-            RgbaImage::from_raw(width, height, argb_image)
-                .with_context(|| "Bug: not enough bytes allocated for image.")
-                .log_err()?,
-        ),
+        Frame::new(image),
         1,
     ))))
 }
@@ -617,9 +603,9 @@ fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+#[cfg(not(target_os = "macos"))]
 fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<dyn VideoBuffer>> {
-    use libwebrtc::native::yuv_helper::argb_to_nv12;
+    use libwebrtc::native::yuv_helper::{abgr_to_nv12, argb_to_nv12};
     use livekit::webrtc::prelude::NV12Buffer;
     match frame.0 {
         scap::frame::Frame::BGRx(frame) => {
@@ -627,6 +613,22 @@ fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<
             let (stride_y, stride_uv) = buffer.strides();
             let (data_y, data_uv) = buffer.data_mut();
             argb_to_nv12(
+                &frame.data,
+                frame.width as u32 * 4,
+                data_y,
+                stride_y,
+                data_uv,
+                stride_uv,
+                frame.width,
+                frame.height,
+            );
+            Some(buffer)
+        }
+        scap::frame::Frame::RGBx(frame) => {
+            let mut buffer = NV12Buffer::new(frame.width as u32, frame.height as u32);
+            let (stride_y, stride_uv) = buffer.strides();
+            let (data_y, data_uv) = buffer.data_mut();
+            abgr_to_nv12(
                 &frame.data,
                 frame.width as u32 * 4,
                 data_y,
@@ -657,11 +659,6 @@ fn video_frame_buffer_to_webrtc(frame: ScreenCaptureFrame) -> Option<impl AsRef<
             None
         }
     }
-}
-
-#[cfg(target_os = "windows")]
-fn video_frame_buffer_to_webrtc(_frame: ScreenCaptureFrame) -> Option<impl AsRef<dyn VideoBuffer>> {
-    None as Option<Box<dyn VideoBuffer>>
 }
 
 trait DeviceChangeListenerApi: Stream<Item = ()> + Sized {

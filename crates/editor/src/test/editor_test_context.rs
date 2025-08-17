@@ -1,5 +1,5 @@
 use crate::{
-    AnchorRangeExt, Autoscroll, DisplayPoint, Editor, MultiBuffer, RowExt,
+    AnchorRangeExt, DisplayPoint, Editor, MultiBuffer, RowExt,
     display_map::{HighlightKey, ToDisplayPoint},
 };
 use buffer_diff::DiffHunkStatusKind;
@@ -297,9 +297,8 @@ impl EditorTestContext {
 
     pub fn set_head_text(&mut self, diff_base: &str) {
         self.cx.run_until_parked();
-        let fs = self.update_editor(|editor, _, cx| {
-            editor.project.as_ref().unwrap().read(cx).fs().as_fake()
-        });
+        let fs =
+            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
         let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
         fs.set_head_for_repo(
             &Self::root_path().join(".git"),
@@ -311,18 +310,16 @@ impl EditorTestContext {
 
     pub fn clear_index_text(&mut self) {
         self.cx.run_until_parked();
-        let fs = self.update_editor(|editor, _, cx| {
-            editor.project.as_ref().unwrap().read(cx).fs().as_fake()
-        });
+        let fs =
+            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
         fs.set_index_for_repo(&Self::root_path().join(".git"), &[]);
         self.cx.run_until_parked();
     }
 
     pub fn set_index_text(&mut self, diff_base: &str) {
         self.cx.run_until_parked();
-        let fs = self.update_editor(|editor, _, cx| {
-            editor.project.as_ref().unwrap().read(cx).fs().as_fake()
-        });
+        let fs =
+            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
         let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
         fs.set_index_for_repo(
             &Self::root_path().join(".git"),
@@ -333,9 +330,8 @@ impl EditorTestContext {
 
     #[track_caller]
     pub fn assert_index_text(&mut self, expected: Option<&str>) {
-        let fs = self.update_editor(|editor, _, cx| {
-            editor.project.as_ref().unwrap().read(cx).fs().as_fake()
-        });
+        let fs =
+            self.update_editor(|editor, _, cx| editor.project().unwrap().read(cx).fs().as_fake());
         let path = self.update_buffer(|buffer, _| buffer.file().unwrap().path().clone());
         let mut found = None;
         fs.with_git_state(&Self::root_path().join(".git"), false, |git_state| {
@@ -362,7 +358,7 @@ impl EditorTestContext {
         let (unmarked_text, selection_ranges) = marked_text_ranges(marked_text, true);
         self.editor.update_in(&mut self.cx, |editor, window, cx| {
             editor.set_text(unmarked_text, window, cx);
-            editor.change_selections(Some(Autoscroll::fit()), window, cx, |s| {
+            editor.change_selections(Default::default(), window, cx, |s| {
                 s.select_ranges(selection_ranges)
             })
         });
@@ -379,7 +375,7 @@ impl EditorTestContext {
         let (unmarked_text, selection_ranges) = marked_text_ranges(marked_text, true);
         self.editor.update_in(&mut self.cx, |editor, window, cx| {
             assert_eq!(editor.text(cx), unmarked_text);
-            editor.change_selections(Some(Autoscroll::fit()), window, cx, |s| {
+            editor.change_selections(Default::default(), window, cx, |s| {
                 s.select_ranges(selection_ranges)
             })
         });
