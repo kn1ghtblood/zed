@@ -26,7 +26,7 @@ pub(super) fn render_action_button(
     .on_click({
         let focus_handle = focus_handle.clone();
         move |_, window, cx| {
-            if !focus_handle.is_focused(&window) {
+            if !focus_handle.is_focused(window) {
                 window.focus(&focus_handle);
             }
             window.dispatch_action(action.boxed_clone(), cx)
@@ -41,15 +41,15 @@ pub(super) fn render_action_button(
 
 pub(crate) fn input_base_styles(border_color: Hsla, map: impl FnOnce(Div) -> Div) -> Div {
     h_flex()
-        .min_w_32()
         .map(map)
+        .min_w_32()
         .h_8()
         .pl_2()
         .pr_1()
         .py_1()
         .border_1()
         .border_color(border_color)
-        .rounded_lg()
+        .rounded_md()
 }
 
 pub(crate) fn render_text_input(

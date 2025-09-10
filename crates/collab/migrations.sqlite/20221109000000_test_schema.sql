@@ -116,6 +116,7 @@ CREATE TABLE "project_repositories" (
     "scan_id" INTEGER NOT NULL,
     "is_deleted" BOOL NOT NULL,
     "current_merge_conflicts" VARCHAR,
+    "merge_message" VARCHAR,
     "branch_summary" VARCHAR,
     "head_commit_details" VARCHAR,
     PRIMARY KEY (project_id, id)
@@ -174,6 +175,7 @@ CREATE TABLE "language_servers" (
     "project_id" INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     "name" VARCHAR NOT NULL,
     "capabilities" TEXT NOT NULL,
+    "worktree_id" BIGINT,
     PRIMARY KEY (project_id, id)
 );
 

@@ -36,6 +36,9 @@ impl fmt::Display for ModelRequestLimitReachedError {
             Plan::ZedProTrial => {
                 "Model request limit reached. Upgrade to Zed Pro for more requests."
             }
+            Plan::ZedFreeV2 | Plan::ZedProV2 | Plan::ZedProTrialV2 => {
+                "Model request limit reached."
+            }
         };
 
         write!(f, "{message}")
@@ -82,7 +85,7 @@ impl LlmApiToken {
 
         let response = client.cloud_client().create_llm_token(system_id).await?;
         *lock = Some(response.token.0.clone());
-        Ok(response.token.0.clone())
+        Ok(response.token.0)
     }
 }
 

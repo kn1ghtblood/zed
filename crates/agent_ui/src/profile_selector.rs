@@ -6,8 +6,8 @@ use gpui::{Action, Entity, FocusHandle, Subscription, prelude::*};
 use settings::{Settings as _, SettingsStore, update_settings_file};
 use std::sync::Arc;
 use ui::{
-    ContextMenu, ContextMenuEntry, DocumentationSide, PopoverMenu, PopoverMenuHandle, Tooltip,
-    prelude::*,
+    ContextMenu, ContextMenuEntry, DocumentationSide, PopoverMenu, PopoverMenuHandle, TintColor,
+    Tooltip, prelude::*,
 };
 
 /// Trait for types that can provide and manage agent profiles
@@ -137,12 +137,11 @@ impl ProfileSelector {
         entry.handler({
             let fs = self.fs.clone();
             let provider = self.provider.clone();
-            let profile_id = profile_id.clone();
             move |_window, cx| {
                 update_settings_file::<AgentSettings>(fs.clone(), cx, {
                     let profile_id = profile_id.clone();
                     move |settings, _cx| {
-                        settings.set_profile(profile_id.clone());
+                        settings.set_profile(profile_id);
                     }
                 });
 
@@ -171,11 +170,11 @@ impl Render for ProfileSelector {
                 .icon(IconName::ChevronDown)
                 .icon_size(IconSize::XSmall)
                 .icon_position(IconPosition::End)
-                .icon_color(Color::Muted);
+                .icon_color(Color::Muted)
+                .selected_style(ButtonStyle::Tinted(TintColor::Accent));
 
             PopoverMenu::new("profile-selector")
                 .trigger_with_tooltip(trigger_button, {
-                    let focus_handle = focus_handle.clone();
                     move |window, cx| {
                         Tooltip::for_action_in(
                             "Toggle Profile Menu",
@@ -196,6 +195,10 @@ impl Render for ProfileSelector {
                 .with_handle(self.menu_handle.clone())
                 .menu(move |window, cx| {
                     Some(this.update(cx, |this, cx| this.build_context_menu(window, cx)))
+                })
+                .offset(gpui::Point {
+                    x: px(0.0),
+                    y: px(-2.0),
                 })
                 .into_any_element()
         } else {
