@@ -83,6 +83,7 @@ where
                     acp::ContentBlock::Text(acp::TextContent {
                         text: "Read the file ".into(),
                         annotations: None,
+                        meta: None,
                     }),
                     acp::ContentBlock::ResourceLink(acp::ResourceLink {
                         uri: "foo.rs".into(),
@@ -92,10 +93,12 @@ where
                         mime_type: None,
                         size: None,
                         title: None,
+                        meta: None,
                     }),
                     acp::ContentBlock::Text(acp::TextContent {
                         text: " and tell me what the content of the println! is".into(),
                         annotations: None,
+                        meta: None,
                     }),
                 ],
                 cx,
@@ -480,6 +483,13 @@ pub async fn init_test(cx: &mut TestAppContext) -> Arc<FakeFs> {
                     default_mode: None,
                 }),
                 gemini: Some(crate::gemini::tests::local_command().into()),
+                codex: Some(BuiltinAgentServerSettings {
+                    path: Some("codex-acp".into()),
+                    args: None,
+                    env: None,
+                    ignore_system_version: None,
+                    default_mode: None,
+                }),
                 custom: collections::HashMap::default(),
             },
             cx,

@@ -10,14 +10,14 @@ pub fn app_menus() -> Vec<Menu> {
         Menu {
             name: "Zed".into(),
             items: vec![
-                MenuItem::action("About Zed…", zed_actions::About),
+                MenuItem::action("About Zed", zed_actions::About),
                 MenuItem::action("Check for Updates", auto_update::Check),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu {
                     name: "Settings".into(),
                     items: vec![
                         MenuItem::action("Open Settings", super::OpenSettings),
-                        MenuItem::action("Open Key Bindings", keymap_editor::OpenKeymapEditor),
+                        MenuItem::action("Open Key Bindings", zed_actions::OpenKeymapEditor),
                         MenuItem::action("Open Default Settings", super::OpenDefaultSettings),
                         MenuItem::action(
                             "Open Default Key Bindings",
@@ -142,6 +142,13 @@ pub fn app_menus() -> Vec<Menu> {
                         replace_newest: false,
                     },
                 ),
+                MenuItem::action(
+                    "Select Previous Occurrence",
+                    editor::actions::SelectPrevious {
+                        replace_newest: false,
+                    },
+                ),
+                MenuItem::action("Select All Occurrences", editor::actions::SelectAllMatches),
                 MenuItem::separator(),
                 MenuItem::action("Move Line Up", editor::actions::MoveLineUp),
                 MenuItem::action("Move Line Down", editor::actions::MoveLineDown),
@@ -252,7 +259,7 @@ pub fn app_menus() -> Vec<Menu> {
             name: "Help".into(),
             items: vec![
                 MenuItem::action(
-                    "View Release Notes",
+                    "View Release Notes Locally",
                     auto_update_ui::ViewReleaseNotesLocally,
                 ),
                 MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),

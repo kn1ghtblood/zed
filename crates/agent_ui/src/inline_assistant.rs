@@ -18,7 +18,9 @@ use agent_settings::AgentSettings;
 use anyhow::{Context as _, Result};
 use client::telemetry::Telemetry;
 use collections::{HashMap, HashSet, VecDeque, hash_map};
+use editor::RowExt;
 use editor::SelectionEffects;
+use editor::scroll::ScrollOffset;
 use editor::{
     Anchor, AnchorRangeExt, CodeActionProvider, Editor, EditorEvent, ExcerptId, ExcerptRange,
     MultiBuffer, MultiBufferSnapshot, ToOffset as _, ToPoint,
@@ -144,8 +146,7 @@ impl InlineAssistant {
             let Some(terminal_panel) = workspace.read(cx).panel::<TerminalPanel>(cx) else {
                 return;
             };
-            let enabled = !DisableAiSettings::get_global(cx).disable_ai
-                && AgentSettings::get_global(cx).enabled;
+            let enabled = AgentSettings::get_global(cx).enabled(cx);
             terminal_panel.update(cx, |terminal_panel, cx| {
                 terminal_panel.set_assistant_enabled(enabled, cx)
             });
@@ -257,8 +258,7 @@ impl InlineAssistant {
         window: &mut Window,
         cx: &mut Context<Workspace>,
     ) {
-        let settings = AgentSettings::get_global(cx);
-        if !settings.enabled || DisableAiSettings::get_global(cx).disable_ai {
+        if !AgentSettings::get_global(cx).enabled(cx) {
             return;
         }
 
@@ -744,19 +744,14 @@ impl InlineAssistant {
             .update(cx, |editor, cx| {
                 let scroll_top = editor.scroll_position(cx).y;
                 let scroll_bottom = scroll_top + editor.visible_line_count().unwrap_or(0.);
-                let prompt_row = editor
+                editor_assists.scroll_lock = editor
                     .row_for_block(decorations.prompt_block_id, cx)
-                    .unwrap()
-                    .0 as f32;
-
-                if (scroll_top..scroll_bottom).contains(&prompt_row) {
-                    editor_assists.scroll_lock = Some(InlineAssistScrollLock {
+                    .map(|row| row.as_f64())
+                    .filter(|prompt_row| (scroll_top..scroll_bottom).contains(&prompt_row))
+                    .map(|prompt_row| InlineAssistScrollLock {
                         assist_id,
                         distance_from_top: prompt_row - scroll_top,
                     });
-                } else {
-                    editor_assists.scroll_lock = None;
-                }
             })
             .ok();
     }
@@ -918,13 +913,13 @@ impl InlineAssistant {
         editor.update(cx, |editor, cx| {
             let scroll_position = editor.scroll_position(cx);
             let target_scroll_top = editor
-                .row_for_block(decorations.prompt_block_id, cx)
-                .unwrap()
-                .0 as f32
+                .row_for_block(decorations.prompt_block_id, cx)?
+                .as_f64()
                 - scroll_lock.distance_from_top;
             if target_scroll_top != scroll_position.y {
                 editor.set_scroll_position(point(scroll_position.x, target_scroll_top), window, cx);
             }
+            Some(())
         });
     }
 
@@ -969,13 +964,14 @@ impl InlineAssistant {
                         let distance_from_top = editor.update(cx, |editor, cx| {
                             let scroll_top = editor.scroll_position(cx).y;
                             let prompt_row = editor
-                                .row_for_block(decorations.prompt_block_id, cx)
-                                .unwrap()
-                                .0 as f32;
-                            prompt_row - scroll_top
+                                .row_for_block(decorations.prompt_block_id, cx)?
+                                .0 as ScrollOffset;
+                            Some(prompt_row - scroll_top)
                         });
 
-                        if distance_from_top != scroll_lock.distance_from_top {
+                        if distance_from_top.is_none_or(|distance_from_top| {
+                            distance_from_top != scroll_lock.distance_from_top
+                        }) {
                             editor_assists.scroll_lock = None;
                         }
                     }
@@ -1201,8 +1197,8 @@ impl InlineAssistant {
             let mut scroll_target_range = None;
             if let Some(decorations) = assist.decorations.as_ref() {
                 scroll_target_range = maybe!({
-                    let top = editor.row_for_block(decorations.prompt_block_id, cx)?.0 as f32;
-                    let bottom = editor.row_for_block(decorations.end_block_id, cx)?.0 as f32;
+                    let top = editor.row_for_block(decorations.prompt_block_id, cx)?.0 as f64;
+                    let bottom = editor.row_for_block(decorations.end_block_id, cx)?.0 as f64;
                     Some((top, bottom))
                 });
                 if scroll_target_range.is_none() {
@@ -1216,15 +1212,15 @@ impl InlineAssistant {
                     .start
                     .to_display_point(&snapshot.display_snapshot)
                     .row();
-                let top = start_row.0 as f32;
+                let top = start_row.0 as ScrollOffset;
                 let bottom = top + 1.0;
                 (top, bottom)
             });
             let mut scroll_target_top = scroll_target_range.0;
             let mut scroll_target_bottom = scroll_target_range.1;
 
-            scroll_target_top -= editor.vertical_scroll_margin() as f32;
-            scroll_target_bottom += editor.vertical_scroll_margin() as f32;
+            scroll_target_top -= editor.vertical_scroll_margin() as ScrollOffset;
+            scroll_target_bottom += editor.vertical_scroll_margin() as ScrollOffset;
 
             let height_in_lines = editor.visible_line_count().unwrap_or(0.);
             let scroll_top = editor.scroll_position(cx).y;
@@ -1552,7 +1548,7 @@ struct EditorInlineAssists {
 
 struct InlineAssistScrollLock {
     assist_id: InlineAssistId,
-    distance_from_top: f32,
+    distance_from_top: ScrollOffset,
 }
 
 impl EditorInlineAssists {
@@ -1795,7 +1791,7 @@ impl CodeActionProvider for AssistantCodeActionProvider {
         _: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Vec<CodeAction>>> {
-        if !AgentSettings::get_global(cx).enabled {
+        if !AgentSettings::get_global(cx).enabled(cx) {
             return Task::ready(Ok(Vec::new()));
         }
 
@@ -1813,16 +1809,13 @@ impl CodeActionProvider for AssistantCodeActionProvider {
             has_diagnostics = true;
         }
         if has_diagnostics {
-            if let Some(symbols_containing_start) = snapshot.symbols_containing(range.start, None)
-                && let Some(symbol) = symbols_containing_start.last()
-            {
+            let symbols_containing_start = snapshot.symbols_containing(range.start, None);
+            if let Some(symbol) = symbols_containing_start.last() {
                 range.start = cmp::min(range.start, symbol.range.start.to_point(&snapshot));
                 range.end = cmp::max(range.end, symbol.range.end.to_point(&snapshot));
             }
-
-            if let Some(symbols_containing_end) = snapshot.symbols_containing(range.end, None)
-                && let Some(symbol) = symbols_containing_end.last()
-            {
+            let symbols_containing_end = snapshot.symbols_containing(range.end, None);
+            if let Some(symbol) = symbols_containing_end.last() {
                 range.start = cmp::min(range.start, symbol.range.start.to_point(&snapshot));
                 range.end = cmp::max(range.end, symbol.range.end.to_point(&snapshot));
             }

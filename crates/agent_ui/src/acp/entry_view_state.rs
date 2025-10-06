@@ -1,8 +1,4 @@
-use std::{
-    cell::{Cell, RefCell},
-    ops::Range,
-    rc::Rc,
-};
+use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use acp_thread::{AcpThread, AgentThreadEntry};
 use agent_client_protocol::{self as acp, ToolCallId};
@@ -30,7 +26,7 @@ pub struct EntryViewState {
     history_store: Entity<HistoryStore>,
     prompt_store: Option<Entity<PromptStore>>,
     entries: Vec<Entry>,
-    prompt_capabilities: Rc<Cell<acp::PromptCapabilities>>,
+    prompt_capabilities: Rc<RefCell<acp::PromptCapabilities>>,
     available_commands: Rc<RefCell<Vec<acp::AvailableCommand>>>,
     agent_name: SharedString,
 }
@@ -41,7 +37,7 @@ impl EntryViewState {
         project: Entity<Project>,
         history_store: Entity<HistoryStore>,
         prompt_store: Option<Entity<PromptStore>>,
-        prompt_capabilities: Rc<Cell<acp::PromptCapabilities>>,
+        prompt_capabilities: Rc<RefCell<acp::PromptCapabilities>>,
         available_commands: Rc<RefCell<Vec<acp::AvailableCommand>>>,
         agent_name: SharedString,
     ) -> Self {
@@ -207,7 +203,7 @@ impl EntryViewState {
         self.entries.drain(range);
     }
 
-    pub fn agent_font_size_changed(&mut self, cx: &mut App) {
+    pub fn agent_ui_font_size_changed(&mut self, cx: &mut App) {
         for entry in self.entries.iter() {
             match entry {
                 Entry::UserMessage { .. } | Entry::AssistantMessage { .. } => {}
@@ -391,7 +387,7 @@ fn diff_editor_text_style_refinement(cx: &mut App) -> TextStyleRefinement {
         font_size: Some(
             TextSize::Small
                 .rems(cx)
-                .to_pixels(ThemeSettings::get_global(cx).agent_font_size(cx))
+                .to_pixels(ThemeSettings::get_global(cx).agent_ui_font_size(cx))
                 .into(),
         ),
         ..Default::default()
@@ -448,11 +444,13 @@ mod tests {
                     path: "/project/hello.txt".into(),
                     old_text: Some("hi world".into()),
                     new_text: "hello world".into(),
+                    meta: None,
                 },
             }],
             locations: vec![],
             raw_input: None,
             raw_output: None,
+            meta: None,
         };
         let connection = Rc::new(StubAgentConnection::new());
         let thread = cx
