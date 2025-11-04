@@ -34,7 +34,7 @@ mod askpass_modal;
 pub mod branch_picker;
 mod commit_modal;
 pub mod commit_tooltip;
-mod commit_view;
+pub mod commit_view;
 mod conflict_view;
 pub mod file_diff_view;
 pub mod git_panel;
@@ -46,6 +46,7 @@ pub(crate) mod remote_output;
 pub mod repository_selector;
 pub mod stash_picker;
 pub mod text_diff_view;
+pub mod worktree_picker;
 
 actions!(
     git,
@@ -59,6 +60,7 @@ pub fn init(cx: &mut App) {
     GitPanelSettings::register(cx);
 
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
+    commit_view::init(cx);
 
     cx.observe_new(|editor: &mut Editor, _, cx| {
         conflict_view::register_editor(editor, editor.buffer().clone(), cx);
@@ -71,6 +73,7 @@ pub fn init(cx: &mut App) {
         git_panel::register(workspace);
         repository_selector::register(workspace);
         branch_picker::register(workspace);
+        worktree_picker::register(workspace);
         stash_picker::register(workspace);
 
         let project = workspace.project().read(cx);
@@ -434,13 +437,12 @@ mod remote_button {
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Fetch), cx);
             },
-            move |window, cx| {
+            move |_window, cx| {
                 git_action_tooltip(
                     "Fetch updates from remote",
                     &git::Fetch,
                     "git fetch",
                     keybinding_target.clone(),
-                    window,
                     cx,
                 )
             },
@@ -462,13 +464,12 @@ mod remote_button {
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
-            move |window, cx| {
+            move |_window, cx| {
                 git_action_tooltip(
                     "Push committed changes to remote",
                     &git::Push,
                     "git push",
                     keybinding_target.clone(),
-                    window,
                     cx,
                 )
             },
@@ -491,13 +492,12 @@ mod remote_button {
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Pull), cx);
             },
-            move |window, cx| {
+            move |_window, cx| {
                 git_action_tooltip(
                     "Pull",
                     &git::Pull,
                     "git pull",
                     keybinding_target.clone(),
-                    window,
                     cx,
                 )
             },
@@ -518,13 +518,12 @@ mod remote_button {
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
-            move |window, cx| {
+            move |_window, cx| {
                 git_action_tooltip(
                     "Publish branch to remote",
                     &git::Push,
                     "git push --set-upstream",
                     keybinding_target.clone(),
-                    window,
                     cx,
                 )
             },
@@ -545,13 +544,12 @@ mod remote_button {
             move |_, window, cx| {
                 window.dispatch_action(Box::new(git::Push), cx);
             },
-            move |window, cx| {
+            move |_window, cx| {
                 git_action_tooltip(
                     "Re-publish branch to remote",
                     &git::Push,
                     "git push --set-upstream",
                     keybinding_target.clone(),
-                    window,
                     cx,
                 )
             },
@@ -563,16 +561,15 @@ mod remote_button {
         action: &dyn Action,
         command: impl Into<SharedString>,
         focus_handle: Option<FocusHandle>,
-        window: &mut Window,
         cx: &mut App,
     ) -> AnyView {
         let label = label.into();
         let command = command.into();
 
         if let Some(handle) = focus_handle {
-            Tooltip::with_meta_in(label, Some(action), command, &handle, window, cx)
+            Tooltip::with_meta_in(label, Some(action), command, &handle, cx)
         } else {
-            Tooltip::with_meta(label, Some(action), command, window, cx)
+            Tooltip::with_meta(label, Some(action), command, cx)
         }
     }
 
