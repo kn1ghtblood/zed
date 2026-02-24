@@ -5,7 +5,8 @@
 #![allow(unused_mut)] // False positives in platform specific code
 
 extern crate self as gpui;
-
+#[doc(hidden)]
+pub static GPUI_MANIFEST_DIR: &'static str = env!("CARGO_MANIFEST_DIR");
 #[macro_use]
 mod action;
 mod app;
@@ -20,6 +21,8 @@ pub mod colors;
 mod element;
 mod elements;
 mod executor;
+mod platform_scheduler;
+pub(crate) use platform_scheduler::PlatformScheduler;
 mod geometry;
 mod global;
 mod input;
@@ -30,9 +33,11 @@ mod keymap;
 mod path_builder;
 mod platform;
 pub mod prelude;
-mod profiler;
+/// Profiling utilities for task timing and thread performance tracking.
+pub mod profiler;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-mod queue;
+#[expect(missing_docs)]
+pub mod queue;
 mod scene;
 mod shared_string;
 mod shared_uri;
@@ -92,12 +97,11 @@ pub use path_builder::*;
 pub use platform::*;
 pub use profiler::*;
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-pub(crate) use queue::{PriorityQueueReceiver, PriorityQueueSender};
+pub use queue::{PriorityQueueReceiver, PriorityQueueSender};
 pub use refineable::*;
 pub use scene::*;
 pub use shared_string::*;
 pub use shared_uri::*;
-pub use smol::Timer;
 use std::{any::Any, future::Future};
 pub use style::*;
 pub use styled::*;
@@ -109,8 +113,6 @@ pub use taffy::{AvailableSpace, LayoutId};
 #[cfg(any(test, feature = "test-support"))]
 pub use test::*;
 pub use text_system::*;
-#[cfg(any(test, feature = "test-support"))]
-pub use util::smol_timeout;
 pub use util::{FutureExt, Timeout, arc_cow::ArcCow};
 pub use view::*;
 pub use window::*;

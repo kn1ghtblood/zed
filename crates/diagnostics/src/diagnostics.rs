@@ -717,7 +717,7 @@ impl Focusable for ProjectDiagnosticsEditor {
 impl Item for ProjectDiagnosticsEditor {
     type Event = EditorEvent;
 
-    fn to_item_events(event: &EditorEvent, f: impl FnMut(ItemEvent)) {
+    fn to_item_events(event: &EditorEvent, f: &mut dyn FnMut(ItemEvent)) {
         Editor::to_item_events(event, f)
     }
 
@@ -728,7 +728,7 @@ impl Item for ProjectDiagnosticsEditor {
 
     fn navigate(
         &mut self,
-        data: Box<dyn Any>,
+        data: Arc<dyn Any + Send>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {

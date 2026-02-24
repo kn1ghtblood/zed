@@ -1,8 +1,10 @@
 use crash_handler::{CrashEventResult, CrashHandler};
+use futures::future::BoxFuture;
 use log::info;
 use minidumper::{Client, LoopAction, MinidumpBinary};
 use release_channel::{RELEASE_CHANNEL, ReleaseChannel};
 use serde::{Deserialize, Serialize};
+use std::mem;
 
 #[cfg(not(target_os = "windows"))]
 use smol::process::Command;
@@ -34,79 +36,45 @@ const CRASH_HANDLER_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 static PANIC_THREAD_ID: AtomicU32 = AtomicU32::new(0);
 
-pub async fn init(crash_init: InitCrashHandler) {
-    let gen_var = match env::var("ZED_GENERATE_MINIDUMPS") {
-        Ok(v) => {
-            if v == "false" || v == "0" {
-                Some(false)
-            } else {
-                Some(true)
+fn should_install_crash_handler() -> bool {
+    if let Ok(value) = env::var("ZED_GENERATE_MINIDUMPS") {
+        return value == "true" || value == "1";
+    }
+
+    if *RELEASE_CHANNEL == ReleaseChannel::Dev {
+        return false;
+    }
+
+    true
+}
+
+/// Install crash signal handlers and spawn the crash-handler subprocess.
+///
+/// The synchronous portion (signal handlers, panic hook) runs inline.
+/// The async keepalive task is passed to `spawn` so the caller decides
+/// which executor to schedule it on.
+pub fn init(crash_init: InitCrashHandler, spawn: impl FnOnce(BoxFuture<'static, ()>)) {
+    if !should_install_crash_handler() {
+        let old_hook = panic::take_hook();
+        panic::set_hook(Box::new(move |info| {
+            unsafe { env::set_var("RUST_BACKTRACE", "1") };
+            old_hook(info);
+            // prevent the macOS crash dialog from popping up
+            if cfg!(target_os = "macos") {
+                std::process::exit(1);
             }
-        }
-        Err(_) => None,
-    };
-
-    match (gen_var, *RELEASE_CHANNEL) {
-        (Some(false), _) | (None, ReleaseChannel::Dev) => {
-            let old_hook = panic::take_hook();
-            panic::set_hook(Box::new(move |info| {
-                unsafe { env::set_var("RUST_BACKTRACE", "1") };
-                old_hook(info);
-                // prevent the macOS crash dialog from popping up
-                if cfg!(target_os = "macos") {
-                    std::process::exit(1);
-                }
-            }));
-            return;
-        }
-        _ => {
-            panic::set_hook(Box::new(panic_hook));
-        }
+        }));
+        return;
     }
 
-    let exe = env::current_exe().expect("unable to find ourselves");
-    let zed_pid = process::id();
-    // TODO: we should be able to get away with using 1 crash-handler process per machine,
-    // but for now we append the PID of the current process which makes it unique per remote
-    // server or interactive zed instance. This solves an issue where occasionally the socket
-    // used by the crash handler isn't destroyed correctly which causes it to stay on the file
-    // system and block further attempts to initialize crash handlers with that socket path.
-    let socket_name = paths::temp_dir().join(format!("zed-crash-handler-{zed_pid}"));
-    #[cfg(not(target_os = "windows"))]
-    let _crash_handler = Command::new(exe)
-        .arg("--crash-handler")
-        .arg(&socket_name)
-        .spawn()
-        .expect("unable to spawn server process");
+    panic::set_hook(Box::new(panic_hook));
 
-    #[cfg(target_os = "windows")]
-    spawn_crash_handler_windows(&exe, &socket_name);
-
-    #[cfg(target_os = "linux")]
-    let server_pid = _crash_handler.id();
-    info!("spawning crash handler process");
-
-    let mut elapsed = Duration::ZERO;
-    let retry_frequency = Duration::from_millis(100);
-    let mut maybe_client = None;
-    while maybe_client.is_none() {
-        if let Ok(client) = Client::with_name(socket_name.as_path()) {
-            maybe_client = Some(client);
-            info!("connected to crash handler process after {elapsed:?}");
-            break;
-        }
-        elapsed += retry_frequency;
-        smol::Timer::after(retry_frequency).await;
-    }
-    let client = maybe_client.unwrap();
-    client
-        .send_message(1, serde_json::to_vec(&crash_init).unwrap())
-        .unwrap();
-
-    let client = Arc::new(client);
     let handler = CrashHandler::attach(unsafe {
-        let client = client.clone();
         crash_handler::make_crash_event(move |crash_context: &crash_handler::CrashContext| {
+            let Some(client) = CRASH_HANDLER.get() else {
+                return CrashEventResult::Handled(false);
+            };
+
             // only request a minidump once
             let res = if REQUESTED_MINIDUMP
                 .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
@@ -128,16 +96,64 @@ pub async fn init(crash_init: InitCrashHandler) {
     })
     .expect("failed to attach signal handler");
 
-    #[cfg(target_os = "linux")]
-    {
-        handler.set_ptracer(Some(server_pid));
+    info!("crash signal handlers installed");
+
+    spawn(Box::pin(connect_and_keepalive(crash_init, handler)));
+}
+
+/// Spawn the crash-handler subprocess, connect the IPC client, and run the
+/// keepalive ping loop. Called on a background executor by [`init`].
+async fn connect_and_keepalive(crash_init: InitCrashHandler, handler: CrashHandler) {
+    let exe = env::current_exe().expect("unable to find ourselves");
+    let zed_pid = process::id();
+    let socket_name = paths::temp_dir().join(format!("zed-crash-handler-{zed_pid}"));
+    #[cfg(not(target_os = "windows"))]
+    let _crash_handler = Command::new(exe)
+        .arg("--crash-handler")
+        .arg(&socket_name)
+        .spawn()
+        .expect("unable to spawn server process");
+
+    #[cfg(target_os = "windows")]
+    spawn_crash_handler_windows(&exe, &socket_name);
+
+    info!("spawning crash handler process");
+
+    let mut elapsed = Duration::ZERO;
+    let retry_frequency = Duration::from_millis(100);
+    let mut maybe_client = None;
+    while maybe_client.is_none() {
+        if let Ok(client) = Client::with_name(socket_name.as_path()) {
+            maybe_client = Some(client);
+            info!("connected to crash handler process after {elapsed:?}");
+            break;
+        }
+        elapsed += retry_frequency;
+        // Crash reporting is called outside of gpui in the remote server right now
+        #[allow(clippy::disallowed_methods)]
+        smol::Timer::after(retry_frequency).await;
     }
+    let client = maybe_client.unwrap();
+    client
+        .send_message(1, serde_json::to_vec(&crash_init).unwrap())
+        .unwrap();
+
+    let client = Arc::new(client);
+
+    #[cfg(target_os = "linux")]
+    handler.set_ptracer(Some(_crash_handler.id()));
+
+    // Publishing the client to the OnceLock makes it visible to the signal
+    // handler callback installed earlier.
     CRASH_HANDLER.set(client.clone()).ok();
-    std::mem::forget(handler);
+    // mem::forget so that the drop is not called
+    mem::forget(handler);
     info!("crash handler registered");
 
     loop {
         client.ping().ok();
+        // Crash reporting is called outside of gpui in the remote server right now
+        #[allow(clippy::disallowed_methods)]
         smol::Timer::after(Duration::from_secs(10)).await;
     }
 }
@@ -296,12 +312,6 @@ impl minidumper::ServerHandler for CrashServer {
 }
 
 pub fn panic_hook(info: &PanicHookInfo) {
-    // Don't handle a panic on threads that are not relevant to the main execution.
-    if extension_host::wasm_host::IS_WASM_THREAD.with(|v| v.load(Ordering::Acquire)) {
-        log::error!("wasm thread panicked!");
-        return;
-    }
-
     let message = info.payload_as_str().unwrap_or("Box<Any>").to_owned();
 
     let span = info

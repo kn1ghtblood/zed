@@ -18,12 +18,12 @@ use lmstudio::{ModelType, get_models};
 pub use settings::LmStudioAvailableModel as AvailableModel;
 use settings::{Settings, SettingsStore};
 use std::pin::Pin;
-use std::str::FromStr;
 use std::{collections::BTreeMap, sync::Arc};
 use ui::{ButtonLike, Indicator, List, ListBulletItem, prelude::*};
 use util::ResultExt;
 
 use crate::AllLanguageModelSettings;
+use crate::provider::util::parse_tool_arguments;
 
 const LMSTUDIO_DOWNLOAD_URL: &str = "https://lmstudio.ai/download";
 const LMSTUDIO_CATALOG_URL: &str = "https://lmstudio.ai/models";
@@ -558,7 +558,7 @@ impl LmStudioEventMapper {
             }
             Some("tool_calls") => {
                 events.extend(self.tool_calls_by_index.drain().map(|(_, tool_call)| {
-                    match serde_json::Value::from_str(&tool_call.arguments) {
+                    match parse_tool_arguments(&tool_call.arguments) {
                         Ok(input) => Ok(LanguageModelCompletionEvent::ToolUse(
                             LanguageModelToolUse {
                                 id: tool_call.id.into(),
@@ -642,9 +642,11 @@ impl ConfigurationView {
         let loading_models_task = Some(cx.spawn({
             let state = state.clone();
             async move |this, cx| {
-                if let Some(task) = Some(state.update(cx, |state, cx| state.authenticate(cx))) {
-                    task.await.log_err();
-                }
+                state
+                    .update(cx, |state, cx| state.authenticate(cx))
+                    .await
+                    .log_err();
+
                 this.update(cx, |this, cx| {
                     this.loading_models_task = None;
                     cx.notify();
